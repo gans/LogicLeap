@@ -83,25 +83,32 @@ def get_task(task_id: UUID, session: SessionDep) -> models.Task:
 def add_actor(
     task_id: UUID, command: schemas.ActorAssignment, session: SessionDep
 ) -> dict[str, str]:
-    task = services._task(session, task_id, command.expected_version)
-    services._get(session, models.Actor, command.actor_id)
-    session.add(
-        models.TaskActor(
-            task_id=task_id,
-            actor_id=command.actor_id,
-            role=command.role,
-            added_by_actor_id=command.acting_actor_id,
-        )
-    )
-    services._mutate_task(
-        session,
-        task,
-        "ActorAddedToTask",
-        command.acting_actor_id,
-        {"actor_id": str(command.actor_id), "role": command.role},
-    )
-    session.commit()
+    services.assign_actor(session, task_id, command)
     return {"status": "created"}
+
+
+@router.post("/questions/{question_id}/answers", status_code=201)
+def answer_question(
+    question_id: UUID, command: schemas.AnswerCreate, session: SessionDep
+) -> dict[str, str]:
+    answer = services.answer_question(session, question_id, command)
+    return {"id": str(answer.id)}
+
+
+@router.post("/blockers/{blocker_id}/resolve")
+def resolve_blocker(
+    blocker_id: UUID, command: schemas.ResolveBlocker, session: SessionDep
+) -> dict[str, str]:
+    blocker = services.resolve_blocker(session, blocker_id, command)
+    return {"id": str(blocker.id), "status": blocker.status}
+
+
+@router.post("/decisions/{decision_id}/approve")
+def approve_decision(
+    decision_id: UUID, command: schemas.ApproveDecision, session: SessionDep
+) -> dict[str, str]:
+    decision = services.approve_decision(session, decision_id, command)
+    return {"id": str(decision.id), "status": decision.status}
 
 
 @router.post("/tasks/{task_id}/contexts", status_code=201)

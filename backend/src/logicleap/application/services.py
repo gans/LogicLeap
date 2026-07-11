@@ -135,13 +135,13 @@ def create_task(session: Session, epic_id: UUID, command: schemas.TaskCreate) ->
     return task
 
 
-def add_task_entity(
+def add_task_entity[EntityT: models.Base](
     session: Session,
     task_id: UUID,
     command: schemas.TaskCommand,
-    entity: models.Base,
+    entity: EntityT,
     event_type: str,
-) -> Any:
+) -> EntityT:
     task = _task(session, task_id, command.expected_version)
     session.add(entity)
     session.flush()
@@ -289,6 +289,199 @@ def allowed_for_task(
                 "suggested": task.state is TaskState.BLOCKED and target == task.blocked_from_state,
             }
         )
+    return result
+
+
+def assign_actor(session: Session, task_id: UUID, command: schemas.ActorAssignment) -> None:
+    task = _task(session, task_id, command.expected_version)
+    _get(session, models.Actor, command.actor_id)
+    session.add(
+        models.TaskActor(
+            task_id=task_id,
+            actor_id=command.actor_id,
+            role=command.role,
+            added_by_actor_id=command.acting_actor_id,
+        )
+    )
+    _mutate_task(
+        session,
+        task,
+        "ActorAddedToTask",
+        command.acting_actor_id,
+        {"actor_id": str(command.actor_id), "role": command.role},
+    )
+    session.commit()
+
+
+def add_context(
+    session: Session, task_id: UUID, command: schemas.ContextCreate
+) -> models.ContextEntry:
+    data = command.model_dump(exclude={"expected_version", "acting_actor_id"})
+    entity: models.ContextEntry = models.ContextEntry(
+        task_id=task_id,
+        **data,
+        status="ACTIVE",
+        created_by_actor_id=command.acting_actor_id,
+    )
+    return add_task_entity(session, task_id, command, entity, "ContextAdded")
+
+
+def add_requirement(
+    session: Session, task_id: UUID, command: schemas.RequirementCreate
+) -> models.Requirement:
+    data = command.model_dump(exclude={"expected_version", "acting_actor_id"})
+    entity: models.Requirement = models.Requirement(
+        task_id=task_id, **data, created_by_actor_id=command.acting_actor_id
+    )
+    return add_task_entity(session, task_id, command, entity, "RequirementAdded")
+
+
+def add_acceptance_criterion(
+    session: Session, task_id: UUID, command: schemas.AcceptanceCriterionCreate
+) -> models.AcceptanceCriterion:
+    data = command.model_dump(exclude={"expected_version", "acting_actor_id"})
+    entity: models.AcceptanceCriterion = models.AcceptanceCriterion(
+        task_id=task_id,
+        **data,
+        status="ACTIVE",
+        created_by_actor_id=command.acting_actor_id,
+    )
+    return add_task_entity(session, task_id, command, entity, "AcceptanceCriterionAdded")
+
+
+def ask_question(
+    session: Session, task_id: UUID, command: schemas.QuestionCreate
+) -> models.Question:
+    data = command.model_dump(exclude={"expected_version", "acting_actor_id"})
+    entity: models.Question = models.Question(
+        task_id=task_id,
+        **data,
+        status="OPEN",
+        asked_by_actor_id=command.acting_actor_id,
+    )
+    return add_task_entity(session, task_id, command, entity, "QuestionAsked")
+
+
+def answer_question(
+    session: Session, question_id: UUID, command: schemas.AnswerCreate
+) -> models.QuestionAnswer:
+    question = _get(session, models.Question, question_id)
+    task = _task(session, question.task_id)
+    answer = models.QuestionAnswer(
+        question_id=question_id,
+        answer=command.answer,
+        answered_by_actor_id=command.acting_actor_id,
+        supersedes_answer_id=command.supersedes_answer_id,
+    )
+    session.add(answer)
+    question.status = "ANSWERED"
+    _mutate_task(
+        session,
+        task,
+        "QuestionAnswered",
+        command.acting_actor_id,
+        {"question_id": str(question_id)},
+    )
+    session.commit()
+    session.refresh(answer)
+    return answer
+
+
+def create_blocker(
+    session: Session, task_id: UUID, command: schemas.BlockerCreate
+) -> models.Blocker:
+    entity: models.Blocker = models.Blocker(
+        task_id=task_id,
+        description=command.description,
+        status="OPEN",
+        created_by_actor_id=command.acting_actor_id,
+    )
+    return add_task_entity(session, task_id, command, entity, "BlockerCreated")
+
+
+def resolve_blocker(
+    session: Session, blocker_id: UUID, command: schemas.ResolveBlocker
+) -> models.Blocker:
+    blocker = _get(session, models.Blocker, blocker_id)
+    task = _task(session, blocker.task_id, command.expected_version)
+    blocker.status = "RESOLVED"
+    blocker.resolution = command.resolution
+    blocker.resolved_by_actor_id = command.acting_actor_id
+    blocker.resolved_at = utcnow()
+    blocker.version += 1
+    _mutate_task(
+        session, task, "BlockerResolved", command.acting_actor_id, {"blocker_id": str(blocker_id)}
+    )
+    session.commit()
+    session.refresh(blocker)
+    return blocker
+
+
+def propose_decision(
+    session: Session, task_id: UUID, command: schemas.DecisionCreate
+) -> models.Decision:
+    data = command.model_dump(exclude={"expected_version", "acting_actor_id"})
+    entity: models.Decision = models.Decision(
+        task_id=task_id,
+        **data,
+        status="PROPOSED",
+        proposed_by_actor_id=command.acting_actor_id,
+    )
+    return add_task_entity(session, task_id, command, entity, "DecisionProposed")
+
+
+def approve_decision(
+    session: Session, decision_id: UUID, command: schemas.ApproveDecision
+) -> models.Decision:
+    decision = _get(session, models.Decision, decision_id)
+    task = _task(session, decision.task_id, command.expected_version)
+    if command.acting_actor_id != task.architect_actor_id:
+        raise PolicyError("Only the assigned architect may approve a decision")
+    decision.status = "APPROVED"
+    decision.approved_by_actor_id = command.acting_actor_id
+    decision.approved_at = utcnow()
+    decision.version += 1
+    _mutate_task(
+        session,
+        task,
+        "DecisionApproved",
+        command.acting_actor_id,
+        {"decision_id": str(decision_id)},
+    )
+    session.commit()
+    session.refresh(decision)
+    return decision
+
+
+def get_task_working_context(session: Session, task_id: UUID) -> dict[str, Any]:
+    task = _task(session, task_id)
+    result: dict[str, Any] = {
+        "task": schemas.TaskRead.model_validate(task).model_dump(mode="json"),
+        "allowed_transitions": allowed_for_task(session, task),
+    }
+    collections: dict[str, Any] = {
+        "actors": models.TaskActor,
+        "requirements": models.Requirement,
+        "acceptance_criteria": models.AcceptanceCriterion,
+        "context_entries": models.ContextEntry,
+        "questions": models.Question,
+        "blockers": models.Blocker,
+        "decisions": models.Decision,
+        "implementation_runs": models.ImplementationRun,
+        "evidence": models.Evidence,
+        "reviews": models.Review,
+    }
+    for name, model in collections.items():
+        rows = session.scalars(select(model).where(model.task_id == task_id)).all()
+        result[name] = [
+            {
+                column.name: getattr(row, column.key)
+                if not isinstance(getattr(row, column.key), UUID)
+                else str(getattr(row, column.key))
+                for column in model.__table__.columns
+            }
+            for row in rows
+        ]
     return result
 
 
