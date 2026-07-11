@@ -30,3 +30,23 @@ docker compose down -v
 
 The equivalent shortcuts are `make up`, `make down`, `make reset`, `make migrate`,
 `make seed`, `make test`, and `make lint`.
+
+Seed the running database with a migration epic, an architect, an analysis agent,
+and three representative tasks:
+
+```sh
+make seed
+```
+
+The seed is idempotent. PostgreSQL data persists in the `postgres_data` volume;
+use `make reset` or `docker compose down -v` for a clean database.
+
+## Design guarantees
+
+- UUID4 primary keys and timezone-aware PostgreSQL timestamps
+- dedicated epic and task architect foreign keys
+- optimistic task versions on meaningful child mutations
+- append-only aggregate events ordered by aggregate sequence
+- intent-specific APIs and MCP tools; no hard delete, generic update, SQL tool,
+  or arbitrary query surface
+- centralized transition and readiness policies shared by every adapter

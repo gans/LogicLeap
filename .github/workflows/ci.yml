@@ -1,0 +1,30 @@
+name: CI
+
+on: [push, pull_request]
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build and start stack
+        run: docker compose up --build --wait
+      - name: Backend tests
+        run: docker compose run --rm backend pytest
+      - name: Backend lint and types
+        run: |
+          docker compose run --rm backend ruff check .
+          docker compose run --rm backend mypy src
+      - name: Frontend tests and types
+        run: |
+          docker compose run --rm frontend npm test
+          docker compose run --rm frontend npm run typecheck
+      - name: Migration is current
+        run: docker compose run --rm backend alembic check
+      - name: Logs on failure
+        if: failure()
+        run: docker compose logs --no-color
+      - name: Stop stack
+        if: always()
+        run: docker compose down -v
+

@@ -56,3 +56,10 @@ def test_create_epic_and_task_inherits_architect() -> None:
     )
     assert readiness.status_code == 200
     assert readiness.json()["ready"] is True
+
+    working_context = client.get(f"/api/v1/tasks/{task['id']}/working-context")
+    assert working_context.status_code == 200
+    assert [event["type"] for event in working_context.json()["timeline"]] == [
+        "TaskCreated",
+        "ActorAddedToTask",
+    ]

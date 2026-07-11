@@ -1,5 +1,5 @@
 from collections.abc import Iterator
-from typing import Annotated, Any
+from typing import Annotated
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Query
@@ -272,27 +272,4 @@ def timeline(task_id: UUID, session: SessionDep) -> list[dict[str, object]]:
 
 @router.get("/tasks/{task_id}/working-context")
 def working_context(task_id: UUID, session: SessionDep) -> dict[str, object]:
-    task = services._task(session, task_id)
-    collections: dict[str, Any] = {
-        "actors": models.TaskActor,
-        "requirements": models.Requirement,
-        "acceptance_criteria": models.AcceptanceCriterion,
-        "context_entries": models.ContextEntry,
-        "questions": models.Question,
-        "blockers": models.Blocker,
-        "decisions": models.Decision,
-        "implementation_runs": models.ImplementationRun,
-        "evidence": models.Evidence,
-        "reviews": models.Review,
-    }
-    result: dict[str, object] = {
-        "task": schemas.TaskRead.model_validate(task).model_dump(mode="json")
-    }
-    for name, model in collections.items():
-        rows = session.scalars(select(model).where(model.task_id == task_id)).all()
-        result[name] = [
-            {column.name: getattr(row, column.key) for column in model.__table__.columns}
-            for row in rows
-        ]
-    result["allowed_transitions"] = services.allowed_for_task(session, task)
-    return result
+    return services.get_task_working_context(session, task_id)

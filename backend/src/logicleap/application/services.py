@@ -459,6 +459,22 @@ def get_task_working_context(session: Session, task_id: UUID) -> dict[str, Any]:
         "task": schemas.TaskRead.model_validate(task).model_dump(mode="json"),
         "allowed_transitions": allowed_for_task(session, task),
     }
+    events = session.scalars(
+        select(models.DomainEvent)
+        .where(models.DomainEvent.aggregate_id == task_id)
+        .order_by(models.DomainEvent.aggregate_sequence)
+    )
+    result["timeline"] = [
+        {
+            "id": str(event.id),
+            "sequence": event.aggregate_sequence,
+            "type": event.event_type,
+            "actor_id": str(event.actor_id) if event.actor_id else None,
+            "payload": event.payload,
+            "occurred_at": event.occurred_at.isoformat(),
+        }
+        for event in events
+    ]
     collections: dict[str, Any] = {
         "actors": models.TaskActor,
         "requirements": models.Requirement,
