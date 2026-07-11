@@ -19,4 +19,3 @@ def readiness() -> dict[str, str]:
     if not ready:
         raise HTTPException(status_code=503, detail="database unavailable")
     return {"status": "ready"}
-

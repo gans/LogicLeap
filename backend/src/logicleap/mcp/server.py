@@ -23,4 +23,3 @@ def run_streamable_http() -> None:
 
 if __name__ == "__main__":
     run_streamable_http()
-
