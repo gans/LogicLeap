@@ -1,0 +1,18 @@
+FROM python:3.13-slim
+
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    PIP_DISABLE_PIP_VERSION_CHECK=1
+
+WORKDIR /app
+COPY backend/pyproject.toml ./
+COPY backend/src ./src
+RUN pip install --no-cache-dir -e '.[dev]'
+COPY backend/alembic.ini ./
+COPY backend/alembic ./alembic
+COPY backend/tests ./tests
+COPY backend/entrypoint.sh ./entrypoint.sh
+RUN chmod +x ./entrypoint.sh
+
+CMD ["./entrypoint.sh"]
+
