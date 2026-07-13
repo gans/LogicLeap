@@ -19,3 +19,4 @@ htmlcov
 *.key
 *.p12
 *.pfx
+.trivy-work
