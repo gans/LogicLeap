@@ -30,3 +30,16 @@ def test_completion_requires_delivery_evidence_and_architect() -> None:
     )
 
     assert evaluate_readiness(TaskState.COMPLETED, facts).ready
+
+
+def test_required_epic_context_reports_kind() -> None:
+    facts = ReadinessFacts(
+        confirmed_requirements=1,
+        acceptance_criteria=1,
+        missing_epic_context_kinds=("ARCHITECTURE",),
+    )
+
+    result = evaluate_readiness(TaskState.READY_FOR_IMPLEMENTATION, facts)
+
+    missing = next(item for item in result.missing if item.code == "MISSING_EPIC_CONTEXT")
+    assert missing.required_kind == "ARCHITECTURE"

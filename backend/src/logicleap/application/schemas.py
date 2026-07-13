@@ -5,6 +5,8 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from logicleap.domain.enums import (
     ContextAuthority,
+    EpicContextKind,
+    EpicContextStatus,
     EvidenceKind,
     RequirementType,
     ReviewStatus,
@@ -49,6 +51,76 @@ class EpicRead(ORMModel):
     created_at: datetime
 
 
+class EpicContextRead(ORMModel):
+    id: UUID
+    epic_id: UUID
+    kind: EpicContextKind
+    title: str
+    content: str
+    authority: ContextAuthority
+    status: EpicContextStatus
+    created_by_actor_id: UUID
+    approved_by_actor_id: UUID | None
+    approved_at: datetime | None
+    supersedes_context_id: UUID | None
+    source_task_id: UUID | None
+    source_context_id: UUID | None
+    source_decision_id: UUID | None
+    source_evidence_id: UUID | None
+    source_uri: str | None
+    is_required_for_analysis: bool
+    is_required_for_implementation: bool
+    rejection_reason: str | None
+    rejected_by_actor_id: UUID | None
+    rejected_at: datetime | None
+    deprecation_reason: str | None
+    deprecated_by_actor_id: UUID | None
+    deprecated_at: datetime | None
+    version: int
+    created_at: datetime
+    updated_at: datetime
+
+
+class EpicContextCommand(BaseModel):
+    acting_actor_id: UUID
+    expected_epic_version: int
+
+
+class EpicContextCreate(EpicContextCommand):
+    kind: EpicContextKind
+    title: str = Field(min_length=1, max_length=250)
+    content: str = Field(min_length=1)
+    source_uri: str | None = None
+    supersedes_context_id: UUID | None = None
+    is_required_for_analysis: bool = False
+    is_required_for_implementation: bool = False
+    approve_immediately: bool = False
+
+
+class EpicContextReplacement(EpicContextCommand):
+    kind: EpicContextKind | None = None
+    title: str = Field(min_length=1, max_length=250)
+    content: str = Field(min_length=1)
+    source_uri: str | None = None
+    is_required_for_analysis: bool | None = None
+    is_required_for_implementation: bool | None = None
+
+
+class EpicContextReview(EpicContextCommand):
+    reason: str | None = None
+
+
+class EpicContextDeprecate(EpicContextCommand):
+    reason: str = Field(min_length=1)
+
+
+class PromoteTaskLearning(EpicContextCreate):
+    task_id: UUID
+    source_context_id: UUID | None = None
+    source_decision_id: UUID | None = None
+    source_evidence_id: UUID | None = None
+
+
 class TaskCreate(BaseModel):
     title: str = Field(min_length=1, max_length=250)
     summary: str = Field(min_length=1)
@@ -87,6 +159,12 @@ class ContextCreate(TaskCommand):
     source_uri: str | None = None
     authority: ContextAuthority
     supersedes_context_entry_id: UUID | None = None
+
+
+class ContextConflictCreate(TaskCommand):
+    epic_context_id: UUID
+    task_context_id: UUID
+    reason: str = Field(min_length=1)
 
 
 class RequirementCreate(TaskCommand):
@@ -146,6 +224,7 @@ class ImplementationRunCreate(TaskCommand):
     summary: str
     status: str
     reference_uri: str | None = None
+    epic_context_version_used: int | None = None
 
 
 class EvidenceCreate(TaskCommand):
@@ -155,12 +234,14 @@ class EvidenceCreate(TaskCommand):
     reference_uri: str | None = None
     passed: bool | None = None
     implementation_run_id: UUID | None = None
+    epic_context_version_used: int | None = None
 
 
 class ReviewCreate(TaskCommand):
     summary: str
     status: ReviewStatus
     reviewer_actor_id: UUID
+    epic_context_version_used: int | None = None
 
 
 class ReviewFindingCreate(BaseModel):

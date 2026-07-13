@@ -22,11 +22,117 @@ def _session() -> Session:
     return Session(create_database_engine())
 
 
+def _compact_agent_working_context(context: dict[str, Any]) -> dict[str, Any]:
+    pending = context.get("epic_context", {}).get("pending_proposals", [])
+    context["epic_context"]["pending_proposals"] = [
+        {
+            "id": item["id"],
+            "kind": item["kind"],
+            "title": item["title"],
+            "authority": item["authority"],
+            "status": item["status"],
+            "supersedes_context_id": item.get("supersedes_context_id"),
+            "source_task_id": item.get("source_task_id"),
+        }
+        for item in pending
+    ]
+    return context
+
+
 @mcp.tool()
 def get_task_working_context(task_id: UUID) -> dict[str, Any]:
     """Return the complete coordinated working context for a task."""
     with _session() as session:
-        return services.get_task_working_context(session, task_id)
+        return _compact_agent_working_context(services.get_task_working_context(session, task_id))
+
+
+@mcp.tool()
+def get_epic_context(epic_id: UUID) -> list[dict[str, Any]]:
+    """Return full active approved epic context for use as agent instructions."""
+    with _session() as session:
+        return [
+            schemas.EpicContextRead.model_validate(item).model_dump(mode="json")
+            for item in services.list_epic_context(session, epic_id)
+        ]
+
+
+@mcp.tool()
+def list_epic_context_history(epic_id: UUID) -> list[dict[str, Any]]:
+    """Return compact epic context history; inactive content is intentionally omitted."""
+    with _session() as session:
+        return [
+            {
+                "id": str(item.id),
+                "kind": item.kind,
+                "title": item.title,
+                "authority": item.authority,
+                "status": item.status,
+                "supersedes_context_id": (
+                    str(item.supersedes_context_id) if item.supersedes_context_id else None
+                ),
+                "source_task_id": str(item.source_task_id) if item.source_task_id else None,
+                "created_at": item.created_at.isoformat(),
+            }
+            for item in services.list_epic_context(session, epic_id, include_history=True)
+        ]
+
+
+@mcp.tool()
+def propose_epic_context(epic_id: UUID, command: schemas.EpicContextCreate) -> dict[str, str]:
+    """Propose epic context; only an architect may explicitly request immediate approval."""
+    with _session() as session:
+        entry = services.create_epic_context(session, epic_id, command)
+        return {"id": str(entry.id), "authority": entry.authority, "status": entry.status}
+
+
+@mcp.tool()
+def propose_epic_context_improvement(
+    epic_id: UUID, context_id: UUID, command: schemas.EpicContextReplacement
+) -> dict[str, str]:
+    """Propose a historical replacement without overwriting approved context."""
+    with _session() as session:
+        entry = services.propose_epic_context_replacement(session, epic_id, context_id, command)
+        return {"id": str(entry.id), "authority": entry.authority, "status": entry.status}
+
+
+@mcp.tool()
+def propose_epic_context_from_task(
+    epic_id: UUID, command: schemas.PromoteTaskLearning
+) -> dict[str, str]:
+    """Promote a participating actor's task learning into the epic review workflow."""
+    with _session() as session:
+        entry = services.promote_task_learning(session, epic_id, command)
+        return {"id": str(entry.id), "authority": entry.authority, "status": entry.status}
+
+
+@mcp.tool()
+def approve_epic_context(
+    epic_id: UUID, context_id: UUID, command: schemas.EpicContextReview
+) -> dict[str, str]:
+    """Approve proposed context as the epic architect."""
+    with _session() as session:
+        entry = services.approve_epic_context(session, epic_id, context_id, command)
+        return {"id": str(entry.id), "authority": entry.authority, "status": entry.status}
+
+
+@mcp.tool()
+def reject_epic_context(
+    epic_id: UUID, context_id: UUID, command: schemas.EpicContextReview
+) -> dict[str, str]:
+    """Reject proposed context as the epic architect, preserving history."""
+    with _session() as session:
+        entry = services.reject_epic_context(session, epic_id, context_id, command)
+        return {"id": str(entry.id), "authority": entry.authority, "status": entry.status}
+
+
+@mcp.tool()
+def deprecate_epic_context(
+    epic_id: UUID, context_id: UUID, command: schemas.EpicContextDeprecate
+) -> dict[str, str]:
+    """Deprecate active approved context as the epic architect."""
+    with _session() as session:
+        entry = services.deprecate_epic_context(session, epic_id, context_id, command)
+        return {"id": str(entry.id), "authority": entry.authority, "status": entry.status}
 
 
 @mcp.tool()

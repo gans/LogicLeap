@@ -23,6 +23,8 @@ from logicleap.domain.enums import (
     ActorKind,
     ContextAuthority,
     ContextStatus,
+    EpicContextKind,
+    EpicContextStatus,
     EvidenceKind,
     RequirementType,
     ReviewStatus,
@@ -100,6 +102,95 @@ class TaskActor(Base):
     role: Mapped[str] = mapped_column(String(100))
     added_by_actor_id: Mapped[UUID] = mapped_column(ForeignKey("actors.id", ondelete="RESTRICT"))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class EpicContextEntry(Base, IdentityMixin, TimestampMixin, VersionMixin):
+    __tablename__ = "epic_context_entries"
+    epic_id: Mapped[UUID] = mapped_column(ForeignKey("epics.id", ondelete="RESTRICT"), index=True)
+    kind: Mapped[EpicContextKind] = mapped_column(Enum(EpicContextKind, name="epic_context_kind"))
+    title: Mapped[str] = mapped_column(String(250))
+    content: Mapped[str] = mapped_column(Text)
+    authority: Mapped[ContextAuthority] = mapped_column(
+        Enum(ContextAuthority, name="context_authority")
+    )
+    status: Mapped[EpicContextStatus] = mapped_column(
+        Enum(EpicContextStatus, name="epic_context_status")
+    )
+    created_by_actor_id: Mapped[UUID] = mapped_column(ForeignKey("actors.id", ondelete="RESTRICT"))
+    approved_by_actor_id: Mapped[UUID | None] = mapped_column(
+        ForeignKey("actors.id", ondelete="RESTRICT")
+    )
+    approved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    supersedes_context_id: Mapped[UUID | None] = mapped_column(
+        ForeignKey("epic_context_entries.id", ondelete="RESTRICT")
+    )
+    source_task_id: Mapped[UUID | None] = mapped_column(ForeignKey("tasks.id", ondelete="RESTRICT"))
+    source_context_id: Mapped[UUID | None] = mapped_column(
+        ForeignKey("context_entries.id", ondelete="RESTRICT")
+    )
+    source_decision_id: Mapped[UUID | None] = mapped_column(
+        ForeignKey("decisions.id", ondelete="RESTRICT")
+    )
+    source_evidence_id: Mapped[UUID | None] = mapped_column(
+        ForeignKey("evidence.id", ondelete="RESTRICT")
+    )
+    source_uri: Mapped[str | None] = mapped_column(String(2000))
+    is_required_for_analysis: Mapped[bool] = mapped_column(
+        Boolean, default=False, server_default="false"
+    )
+    is_required_for_implementation: Mapped[bool] = mapped_column(
+        Boolean, default=False, server_default="false"
+    )
+    rejection_reason: Mapped[str | None] = mapped_column(Text)
+    rejected_by_actor_id: Mapped[UUID | None] = mapped_column(
+        ForeignKey("actors.id", ondelete="RESTRICT")
+    )
+    rejected_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    deprecation_reason: Mapped[str | None] = mapped_column(Text)
+    deprecated_by_actor_id: Mapped[UUID | None] = mapped_column(
+        ForeignKey("actors.id", ondelete="RESTRICT")
+    )
+    deprecated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    __table_args__ = (
+        CheckConstraint(
+            "supersedes_context_id IS NULL OR supersedes_context_id <> id",
+            name="ck_epic_context_not_self",
+        ),
+        CheckConstraint(
+            "authority <> 'APPROVED' OR "
+            "(approved_by_actor_id IS NOT NULL AND approved_at IS NOT NULL)",
+            name="ck_epic_context_approval",
+        ),
+        CheckConstraint(
+            "status <> 'REJECTED' OR (rejection_reason IS NOT NULL AND "
+            "rejected_by_actor_id IS NOT NULL AND rejected_at IS NOT NULL)",
+            name="ck_epic_context_rejection",
+        ),
+        CheckConstraint(
+            "status <> 'DEPRECATED' OR (deprecation_reason IS NOT NULL AND "
+            "deprecated_by_actor_id IS NOT NULL AND deprecated_at IS NOT NULL)",
+            name="ck_epic_context_deprecation",
+        ),
+        Index("ix_epic_context_filter", "epic_id", "kind", "authority", "status"),
+    )
+
+
+class ContextConflict(Base, IdentityMixin, TimestampMixin):
+    __tablename__ = "context_conflicts"
+    task_id: Mapped[UUID] = mapped_column(ForeignKey("tasks.id", ondelete="RESTRICT"), index=True)
+    epic_context_id: Mapped[UUID] = mapped_column(
+        ForeignKey("epic_context_entries.id", ondelete="RESTRICT")
+    )
+    task_context_id: Mapped[UUID] = mapped_column(
+        ForeignKey("context_entries.id", ondelete="RESTRICT")
+    )
+    reason: Mapped[str] = mapped_column(Text)
+    created_by_actor_id: Mapped[UUID] = mapped_column(ForeignKey("actors.id", ondelete="RESTRICT"))
+    __table_args__ = (
+        UniqueConstraint(
+            "task_id", "epic_context_id", "task_context_id", name="uq_context_conflict_pair"
+        ),
+    )
 
 
 class Requirement(Base, IdentityMixin, TimestampMixin, VersionMixin):
@@ -232,6 +323,7 @@ class ImplementationRun(Base, IdentityMixin, TimestampMixin, VersionMixin):
     summary: Mapped[str] = mapped_column(Text)
     status: Mapped[str] = mapped_column(String(30))
     reference_uri: Mapped[str | None] = mapped_column(String(2000))
+    epic_context_version_used: Mapped[int | None] = mapped_column(Integer)
     registered_by_actor_id: Mapped[UUID] = mapped_column(
         ForeignKey("actors.id", ondelete="RESTRICT")
     )
@@ -248,6 +340,7 @@ class Evidence(Base, IdentityMixin, TimestampMixin, VersionMixin):
     description: Mapped[str] = mapped_column(Text)
     reference_uri: Mapped[str | None] = mapped_column(String(2000))
     passed: Mapped[bool | None] = mapped_column(Boolean)
+    epic_context_version_used: Mapped[int | None] = mapped_column(Integer)
     registered_by_actor_id: Mapped[UUID] = mapped_column(
         ForeignKey("actors.id", ondelete="RESTRICT")
     )
@@ -259,6 +352,7 @@ class Review(Base, IdentityMixin, TimestampMixin, VersionMixin):
     summary: Mapped[str] = mapped_column(Text)
     status: Mapped[ReviewStatus] = mapped_column(Enum(ReviewStatus, name="review_status"))
     reviewer_actor_id: Mapped[UUID] = mapped_column(ForeignKey("actors.id", ondelete="RESTRICT"))
+    epic_context_version_used: Mapped[int | None] = mapped_column(Integer)
 
 
 class ReviewFinding(Base, IdentityMixin, TimestampMixin, VersionMixin):

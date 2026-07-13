@@ -1,4 +1,4 @@
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from typing import Annotated
 from uuid import UUID
 
@@ -8,7 +8,13 @@ from sqlalchemy.orm import Session
 
 from logicleap.application import schemas, services
 from logicleap.database import create_database_engine
-from logicleap.domain.enums import ContextStatus, TaskState
+from logicleap.domain.enums import (
+    ContextAuthority,
+    ContextStatus,
+    EpicContextKind,
+    EpicContextStatus,
+    TaskState,
+)
 from logicleap.infrastructure.persistence import models
 
 router = APIRouter(prefix="/api/v1")
@@ -22,9 +28,9 @@ def session_scope() -> Iterator[Session]:
 SessionDep = Annotated[Session, Depends(session_scope)]
 
 
-def _run(operation: object) -> object:
+def _run[ResultT](operation: Callable[[], ResultT]) -> ResultT:
     try:
-        return operation
+        return operation()
     except services.NotFoundError as exc:
         raise HTTPException(404, detail={"code": "not_found", "message": str(exc)}) from exc
     except services.ConflictError as exc:
@@ -45,7 +51,7 @@ def list_actors(session: SessionDep) -> list[models.Actor]:
 
 @router.post("/epics", response_model=schemas.EpicRead, status_code=201)
 def create_epic(command: schemas.EpicCreate, session: SessionDep) -> models.Epic:
-    return _run(services.create_epic(session, command))  # type: ignore[return-value]
+    return _run(lambda: services.create_epic(session, command))
 
 
 @router.get("/epics", response_model=list[schemas.EpicRead])
@@ -55,12 +61,143 @@ def list_epics(session: SessionDep) -> list[models.Epic]:
 
 @router.get("/epics/{epic_id}", response_model=schemas.EpicRead)
 def get_epic(epic_id: UUID, session: SessionDep) -> models.Epic:
-    return _run(services._get(session, models.Epic, epic_id))  # type: ignore[return-value]
+    return _run(lambda: services._get(session, models.Epic, epic_id))
+
+
+@router.get("/epics/{epic_id}/contexts", response_model=list[schemas.EpicContextRead])
+def get_epic_contexts(
+    epic_id: UUID,
+    session: SessionDep,
+    include_proposed: bool = False,
+    include_history: bool = False,
+    kind: EpicContextKind | None = None,
+    authority: ContextAuthority | None = None,
+    status: EpicContextStatus | None = None,
+    source_task_id: UUID | None = None,
+) -> list[models.EpicContextEntry]:
+    return _run(
+        lambda: services.list_epic_context(
+            session,
+            epic_id,
+            include_proposed=include_proposed,
+            include_history=include_history,
+            kind=kind,
+            authority=authority,
+            status=status,
+            source_task_id=source_task_id,
+        )
+    )
+
+
+@router.get("/epics/{epic_id}/contexts/{context_id}", response_model=schemas.EpicContextRead)
+def get_epic_context_entry(
+    epic_id: UUID, context_id: UUID, session: SessionDep
+) -> models.EpicContextEntry:
+    return _run(lambda: services._epic_context(session, epic_id, context_id))
+
+
+@router.get("/epics/{epic_id}/context-history", response_model=list[schemas.EpicContextRead])
+def get_epic_context_history(epic_id: UUID, session: SessionDep) -> list[models.EpicContextEntry]:
+    return _run(lambda: services.list_epic_context(session, epic_id, include_history=True))
+
+
+@router.post("/epics/{epic_id}/contexts", response_model=schemas.EpicContextRead, status_code=201)
+def create_epic_context(
+    epic_id: UUID, command: schemas.EpicContextCreate, session: SessionDep
+) -> models.EpicContextEntry:
+    return _run(lambda: services.create_epic_context(session, epic_id, command))
+
+
+@router.post(
+    "/epics/{epic_id}/contexts/{context_id}/approve",
+    response_model=schemas.EpicContextRead,
+)
+def approve_epic_context(
+    epic_id: UUID,
+    context_id: UUID,
+    command: schemas.EpicContextReview,
+    session: SessionDep,
+) -> models.EpicContextEntry:
+    return _run(lambda: services.approve_epic_context(session, epic_id, context_id, command))
+
+
+@router.post(
+    "/epics/{epic_id}/contexts/{context_id}/reject",
+    response_model=schemas.EpicContextRead,
+)
+def reject_epic_context(
+    epic_id: UUID,
+    context_id: UUID,
+    command: schemas.EpicContextReview,
+    session: SessionDep,
+) -> models.EpicContextEntry:
+    return _run(lambda: services.reject_epic_context(session, epic_id, context_id, command))
+
+
+@router.post(
+    "/epics/{epic_id}/contexts/{context_id}/deprecate",
+    response_model=schemas.EpicContextRead,
+)
+def deprecate_epic_context(
+    epic_id: UUID,
+    context_id: UUID,
+    command: schemas.EpicContextDeprecate,
+    session: SessionDep,
+) -> models.EpicContextEntry:
+    return _run(lambda: services.deprecate_epic_context(session, epic_id, context_id, command))
+
+
+@router.post(
+    "/epics/{epic_id}/contexts/{context_id}/propose-replacement",
+    response_model=schemas.EpicContextRead,
+    status_code=201,
+)
+def propose_epic_context_replacement(
+    epic_id: UUID,
+    context_id: UUID,
+    command: schemas.EpicContextReplacement,
+    session: SessionDep,
+) -> models.EpicContextEntry:
+    return _run(
+        lambda: services.propose_epic_context_replacement(session, epic_id, context_id, command)
+    )
+
+
+@router.post(
+    "/epics/{epic_id}/promote-task-learning",
+    response_model=schemas.EpicContextRead,
+    status_code=201,
+)
+def promote_task_learning(
+    epic_id: UUID, command: schemas.PromoteTaskLearning, session: SessionDep
+) -> models.EpicContextEntry:
+    return _run(lambda: services.promote_task_learning(session, epic_id, command))
+
+
+@router.get("/epics/{epic_id}/timeline")
+def epic_timeline(epic_id: UUID, session: SessionDep) -> list[dict[str, object]]:
+    _run(lambda: services._get(session, models.Epic, epic_id))
+    events = session.scalars(
+        select(models.DomainEvent)
+        .where(models.DomainEvent.aggregate_id == epic_id)
+        .order_by(models.DomainEvent.aggregate_sequence)
+    )
+    return [
+        {
+            "id": event.id,
+            "sequence": event.aggregate_sequence,
+            "type": event.event_type,
+            "actor_id": event.actor_id,
+            "payload": event.payload,
+            "occurred_at": event.occurred_at,
+        }
+        for event in events
+    ]
 
 
 @router.post("/epics/{epic_id}/tasks", response_model=schemas.TaskRead, status_code=201)
 def create_task(epic_id: UUID, command: schemas.TaskCreate, session: SessionDep) -> models.Task:
-    return _run(services.create_task(session, epic_id, command))  # type: ignore[return-value]
+    return _run(lambda: services.create_task(session, epic_id, command))
 
 
 @router.get("/epics/{epic_id}/tasks", response_model=list[schemas.TaskRead])
@@ -76,7 +213,7 @@ def list_tasks(epic_id: UUID, session: SessionDep) -> list[models.Task]:
 
 @router.get("/tasks/{task_id}", response_model=schemas.TaskRead)
 def get_task(task_id: UUID, session: SessionDep) -> models.Task:
-    return _run(services._task(session, task_id))  # type: ignore[return-value]
+    return _run(lambda: services._task(session, task_id))
 
 
 @router.post("/tasks/{task_id}/actors", status_code=201)
@@ -123,6 +260,14 @@ def add_context(
         created_by_actor_id=command.acting_actor_id,
     )
     result = services.add_task_entity(session, task_id, command, entity, "ContextAdded")
+    return {"id": str(result.id)}
+
+
+@router.post("/tasks/{task_id}/context-conflicts", status_code=201)
+def create_context_conflict(
+    task_id: UUID, command: schemas.ContextConflictCreate, session: SessionDep
+) -> dict[str, str]:
+    result = _run(lambda: services.create_context_conflict(session, task_id, command))
     return {"id": str(result.id)}
 
 
@@ -226,7 +371,7 @@ def add_review(task_id: UUID, command: schemas.ReviewCreate, session: SessionDep
 def request_transition(
     task_id: UUID, command: schemas.TransitionRequest, session: SessionDep
 ) -> models.Task:
-    return _run(services.transition_task(session, task_id, command))  # type: ignore[return-value]
+    return _run(lambda: services.transition_task(session, task_id, command))
 
 
 @router.get("/tasks/{task_id}/readiness")

@@ -2,11 +2,20 @@ from datetime import UTC, datetime
 from typing import Any
 from uuid import UUID
 
-from sqlalchemy import func, select
+from sqlalchemy import case, func, select
 from sqlalchemy.orm import Session
 
 from logicleap.application import schemas
-from logicleap.domain.enums import ActorKind, EvidenceKind, ReviewStatus, Severity, TaskState
+from logicleap.domain.enums import (
+    ActorKind,
+    ContextAuthority,
+    EpicContextKind,
+    EpicContextStatus,
+    EvidenceKind,
+    ReviewStatus,
+    Severity,
+    TaskState,
+)
 from logicleap.domain.policies.readiness import ReadinessFacts, ReadinessResult, evaluate_readiness
 from logicleap.domain.policies.transitions import allowed_transitions, validate_transition
 from logicleap.infrastructure.persistence import models
@@ -40,6 +49,17 @@ def _task(session: Session, task_id: UUID, expected_version: int | None = None) 
     return task
 
 
+def _epic(session: Session, epic_id: UUID, expected_version: int | None = None) -> models.Epic:
+    epic = session.scalar(select(models.Epic).where(models.Epic.id == epic_id).with_for_update())
+    if epic is None:
+        raise NotFoundError("Epic not found")
+    if expected_version is not None and epic.version != expected_version:
+        raise ConflictError(
+            f"Expected epic version {expected_version}, current version is {epic.version}"
+        )
+    return epic
+
+
 def _event(
     session: Session,
     aggregate_type: str,
@@ -66,6 +86,373 @@ def _mutate_task(
 ) -> None:
     task.version += 1
     _event(session, "Task", task.id, task.version, event_type, actor_id, payload)
+
+
+def _mutate_epic(
+    session: Session, epic: models.Epic, event_type: str, actor_id: UUID, payload: dict[str, Any]
+) -> None:
+    epic.version += 1
+    _event(session, "EPIC", epic.id, epic.version, event_type, actor_id, payload)
+
+
+def _require_epic_architect(epic: models.Epic, actor_id: UUID) -> None:
+    if actor_id != epic.architect_actor_id:
+        raise PolicyError("Only the epic architect may perform this action")
+
+
+def _epic_context(session: Session, epic_id: UUID, context_id: UUID) -> models.EpicContextEntry:
+    entry = _get(session, models.EpicContextEntry, context_id)
+    if entry.epic_id != epic_id:
+        raise PolicyError("Epic context entry does not belong to this epic")
+    return entry
+
+
+def _validate_supersedes(
+    session: Session, epic_id: UUID, supersedes_id: UUID | None, new_id: UUID | None = None
+) -> models.EpicContextEntry | None:
+    if supersedes_id is None:
+        return None
+    if new_id is not None and supersedes_id == new_id:
+        raise PolicyError("An epic context entry cannot supersede itself")
+    previous = _epic_context(session, epic_id, supersedes_id)
+    if previous.status is EpicContextStatus.REJECTED:
+        raise PolicyError("A rejected proposal cannot be superseded")
+    seen = {new_id} if new_id else set()
+    cursor: models.EpicContextEntry | None = previous
+    while cursor is not None:
+        if cursor.id in seen:
+            raise PolicyError("Epic context superseding cycle detected")
+        seen.add(cursor.id)
+        cursor = (
+            session.get(models.EpicContextEntry, cursor.supersedes_context_id)
+            if cursor.supersedes_context_id
+            else None
+        )
+        if cursor is not None and cursor.epic_id != epic_id:
+            raise PolicyError("Superseding chain crosses epic boundaries")
+    return previous
+
+
+def create_epic_context(
+    session: Session, epic_id: UUID, command: schemas.EpicContextCreate
+) -> models.EpicContextEntry:
+    epic = _epic(session, epic_id, command.expected_epic_version)
+    _get(session, models.Actor, command.acting_actor_id)
+    superseded = _validate_supersedes(session, epic_id, command.supersedes_context_id)
+    immediate = command.approve_immediately
+    if immediate:
+        _require_epic_architect(epic, command.acting_actor_id)
+        if superseded is not None and superseded.status is not EpicContextStatus.ACTIVE:
+            raise PolicyError("The context being replaced is no longer active")
+    now = utcnow() if immediate else None
+    entry = models.EpicContextEntry(
+        epic_id=epic_id,
+        kind=command.kind,
+        title=command.title,
+        content=command.content,
+        authority=ContextAuthority.APPROVED if immediate else ContextAuthority.PROPOSED,
+        status=EpicContextStatus.ACTIVE,
+        created_by_actor_id=command.acting_actor_id,
+        approved_by_actor_id=command.acting_actor_id if immediate else None,
+        approved_at=now,
+        supersedes_context_id=command.supersedes_context_id,
+        source_uri=command.source_uri,
+        is_required_for_analysis=command.is_required_for_analysis,
+        is_required_for_implementation=command.is_required_for_implementation,
+    )
+    session.add(entry)
+    session.flush()
+    _mutate_epic(
+        session,
+        epic,
+        "EpicContextApproved" if immediate else "EpicContextProposed",
+        command.acting_actor_id,
+        {"context_id": str(entry.id), "kind": entry.kind, "title": entry.title},
+    )
+    if immediate and entry.supersedes_context_id:
+        previous = _epic_context(session, epic_id, entry.supersedes_context_id)
+        previous.status = EpicContextStatus.SUPERSEDED
+        previous.version += 1
+        _mutate_epic(
+            session,
+            epic,
+            "EpicContextSuperseded",
+            command.acting_actor_id,
+            {"context_id": str(previous.id), "replacement_context_id": str(entry.id)},
+        )
+    session.commit()
+    session.refresh(entry)
+    return entry
+
+
+def propose_epic_context_replacement(
+    session: Session,
+    epic_id: UUID,
+    context_id: UUID,
+    command: schemas.EpicContextReplacement,
+) -> models.EpicContextEntry:
+    current = _epic_context(session, epic_id, context_id)
+    if current.status is not EpicContextStatus.ACTIVE:
+        raise PolicyError("Only active epic context can be improved")
+    return create_epic_context(
+        session,
+        epic_id,
+        schemas.EpicContextCreate(
+            acting_actor_id=command.acting_actor_id,
+            expected_epic_version=command.expected_epic_version,
+            kind=command.kind or current.kind,
+            title=command.title,
+            content=command.content,
+            source_uri=command.source_uri,
+            supersedes_context_id=current.id,
+            is_required_for_analysis=(
+                current.is_required_for_analysis
+                if command.is_required_for_analysis is None
+                else command.is_required_for_analysis
+            ),
+            is_required_for_implementation=(
+                current.is_required_for_implementation
+                if command.is_required_for_implementation is None
+                else command.is_required_for_implementation
+            ),
+        ),
+    )
+
+
+def approve_epic_context(
+    session: Session, epic_id: UUID, context_id: UUID, command: schemas.EpicContextReview
+) -> models.EpicContextEntry:
+    epic = _epic(session, epic_id, command.expected_epic_version)
+    _require_epic_architect(epic, command.acting_actor_id)
+    entry = _epic_context(session, epic_id, context_id)
+    if (
+        entry.authority is not ContextAuthority.PROPOSED
+        or entry.status is not EpicContextStatus.ACTIVE
+    ):
+        raise PolicyError("Only active proposed context may be approved")
+    previous = _validate_supersedes(session, epic_id, entry.supersedes_context_id, entry.id)
+    if previous is not None:
+        if previous.status is not EpicContextStatus.ACTIVE:
+            raise PolicyError("The context being replaced is no longer active")
+        previous.status = EpicContextStatus.SUPERSEDED
+        previous.version += 1
+        _mutate_epic(
+            session,
+            epic,
+            "EpicContextSuperseded",
+            command.acting_actor_id,
+            {"context_id": str(previous.id), "replacement_context_id": str(entry.id)},
+        )
+    entry.authority = ContextAuthority.APPROVED
+    entry.approved_by_actor_id = command.acting_actor_id
+    entry.approved_at = utcnow()
+    entry.version += 1
+    _mutate_epic(
+        session,
+        epic,
+        "EpicContextApproved",
+        command.acting_actor_id,
+        {"context_id": str(entry.id)},
+    )
+    session.commit()
+    session.refresh(entry)
+    return entry
+
+
+def reject_epic_context(
+    session: Session, epic_id: UUID, context_id: UUID, command: schemas.EpicContextReview
+) -> models.EpicContextEntry:
+    epic = _epic(session, epic_id, command.expected_epic_version)
+    _require_epic_architect(epic, command.acting_actor_id)
+    entry = _epic_context(session, epic_id, context_id)
+    if (
+        entry.authority is not ContextAuthority.PROPOSED
+        or entry.status is not EpicContextStatus.ACTIVE
+    ):
+        raise PolicyError("Only active proposed context may be rejected")
+    if not command.reason or not command.reason.strip():
+        raise PolicyError("A rejection reason is required")
+    entry.status = EpicContextStatus.REJECTED
+    entry.rejection_reason = command.reason
+    entry.rejected_by_actor_id = command.acting_actor_id
+    entry.rejected_at = utcnow()
+    entry.version += 1
+    _mutate_epic(
+        session,
+        epic,
+        "EpicContextRejected",
+        command.acting_actor_id,
+        {"context_id": str(entry.id), "reason": command.reason},
+    )
+    session.commit()
+    session.refresh(entry)
+    return entry
+
+
+def deprecate_epic_context(
+    session: Session, epic_id: UUID, context_id: UUID, command: schemas.EpicContextDeprecate
+) -> models.EpicContextEntry:
+    epic = _epic(session, epic_id, command.expected_epic_version)
+    _require_epic_architect(epic, command.acting_actor_id)
+    entry = _epic_context(session, epic_id, context_id)
+    if entry.status is not EpicContextStatus.ACTIVE or entry.authority not in {
+        ContextAuthority.APPROVED,
+        ContextAuthority.AUTHORITATIVE,
+    }:
+        raise PolicyError("Only active approved context may be deprecated")
+    entry.status = EpicContextStatus.DEPRECATED
+    entry.deprecation_reason = command.reason
+    entry.deprecated_by_actor_id = command.acting_actor_id
+    entry.deprecated_at = utcnow()
+    entry.version += 1
+    _mutate_epic(
+        session,
+        epic,
+        "EpicContextDeprecated",
+        command.acting_actor_id,
+        {"context_id": str(entry.id), "reason": command.reason},
+    )
+    session.commit()
+    session.refresh(entry)
+    return entry
+
+
+def promote_task_learning(
+    session: Session, epic_id: UUID, command: schemas.PromoteTaskLearning
+) -> models.EpicContextEntry:
+    task = _task(session, command.task_id)
+    if task.epic_id != epic_id:
+        raise PolicyError("Task does not belong to this epic")
+    epic = _epic(session, epic_id, command.expected_epic_version)
+    participant = session.get(models.TaskActor, (task.id, command.acting_actor_id))
+    if command.acting_actor_id != epic.architect_actor_id and participant is None:
+        raise PolicyError("Actor must participate in the task or be the epic architect")
+    source_context = (
+        _get(session, models.ContextEntry, command.source_context_id)
+        if command.source_context_id
+        else None
+    )
+    source_decision = (
+        _get(session, models.Decision, command.source_decision_id)
+        if command.source_decision_id
+        else None
+    )
+    source_evidence = (
+        _get(session, models.Evidence, command.source_evidence_id)
+        if command.source_evidence_id
+        else None
+    )
+    if any(
+        source is not None and source.task_id != task.id
+        for source in (source_context, source_decision, source_evidence)
+    ):
+        raise PolicyError("Referenced task entity does not belong to the source task")
+    if command.source_decision_id is not None and (
+        source_decision is None or source_decision.status != "APPROVED"
+    ):
+        raise PolicyError("Only an approved decision may be promoted")
+    superseded = _validate_supersedes(session, epic_id, command.supersedes_context_id)
+    if command.approve_immediately:
+        _require_epic_architect(epic, command.acting_actor_id)
+        if superseded is not None and superseded.status is not EpicContextStatus.ACTIVE:
+            raise PolicyError("The context being replaced is no longer active")
+    immediate = command.approve_immediately
+    entry = models.EpicContextEntry(
+        epic_id=epic_id,
+        kind=command.kind,
+        title=command.title,
+        content=command.content,
+        authority=ContextAuthority.APPROVED if immediate else ContextAuthority.PROPOSED,
+        status=EpicContextStatus.ACTIVE,
+        created_by_actor_id=command.acting_actor_id,
+        approved_by_actor_id=command.acting_actor_id if immediate else None,
+        approved_at=utcnow() if immediate else None,
+        supersedes_context_id=command.supersedes_context_id,
+        source_task_id=task.id,
+        source_context_id=command.source_context_id,
+        source_decision_id=command.source_decision_id,
+        source_evidence_id=command.source_evidence_id,
+        source_uri=command.source_uri,
+        is_required_for_analysis=command.is_required_for_analysis,
+        is_required_for_implementation=command.is_required_for_implementation,
+    )
+    session.add(entry)
+    session.flush()
+    _mutate_epic(
+        session,
+        epic,
+        "EpicContextApproved" if immediate else "EpicContextProposed",
+        command.acting_actor_id,
+        {"context_id": str(entry.id), "kind": entry.kind, "title": entry.title},
+    )
+    if immediate and entry.supersedes_context_id:
+        previous = _epic_context(session, epic_id, entry.supersedes_context_id)
+        previous.status = EpicContextStatus.SUPERSEDED
+        previous.version += 1
+        _mutate_epic(
+            session,
+            epic,
+            "EpicContextSuperseded",
+            command.acting_actor_id,
+            {"context_id": str(previous.id), "replacement_context_id": str(entry.id)},
+        )
+    _mutate_epic(
+        session,
+        epic,
+        "TaskLearningPromoted",
+        command.acting_actor_id,
+        {"context_id": str(entry.id), "task_id": str(task.id)},
+    )
+    session.commit()
+    session.refresh(entry)
+    return entry
+
+
+def list_epic_context(
+    session: Session,
+    epic_id: UUID,
+    *,
+    include_proposed: bool = False,
+    include_history: bool = False,
+    kind: EpicContextKind | None = None,
+    authority: ContextAuthority | None = None,
+    status: EpicContextStatus | None = None,
+    source_task_id: UUID | None = None,
+) -> list[models.EpicContextEntry]:
+    _get(session, models.Epic, epic_id)
+    query = select(models.EpicContextEntry).where(models.EpicContextEntry.epic_id == epic_id)
+    if not include_history:
+        allowed_authorities = [ContextAuthority.APPROVED, ContextAuthority.AUTHORITATIVE]
+        if include_proposed:
+            allowed_authorities.append(ContextAuthority.PROPOSED)
+        query = query.where(
+            models.EpicContextEntry.status == EpicContextStatus.ACTIVE,
+            models.EpicContextEntry.authority.in_(allowed_authorities),
+        )
+    if kind is not None:
+        query = query.where(models.EpicContextEntry.kind == kind)
+    if authority is not None:
+        query = query.where(models.EpicContextEntry.authority == authority)
+    if status is not None:
+        query = query.where(models.EpicContextEntry.status == status)
+    if source_task_id is not None:
+        query = query.where(models.EpicContextEntry.source_task_id == source_task_id)
+    authority_order = case(
+        (models.EpicContextEntry.authority == ContextAuthority.AUTHORITATIVE, 0),
+        (models.EpicContextEntry.authority == ContextAuthority.APPROVED, 1),
+        else_=2,
+    )
+    return list(
+        session.scalars(
+            query.order_by(
+                authority_order,
+                models.EpicContextEntry.kind,
+                models.EpicContextEntry.title,
+                models.EpicContextEntry.approved_at,
+                models.EpicContextEntry.created_at,
+            )
+        )
+    )
 
 
 def create_actor(session: Session, command: schemas.ActorCreate) -> models.Actor:
@@ -100,7 +487,7 @@ def create_epic(session: Session, command: schemas.EpicCreate) -> models.Epic:
     session.add(epic)
     session.flush()
     _event(
-        session, "Epic", epic.id, 1, "EpicCreated", command.acting_actor_id, {"title": epic.title}
+        session, "EPIC", epic.id, 1, "EpicCreated", command.acting_actor_id, {"title": epic.title}
     )
     session.commit()
     session.refresh(epic)
@@ -204,6 +591,36 @@ def get_readiness(
     evidence = frozenset(
         session.scalars(select(models.Evidence.kind).where(models.Evidence.task_id == task.id))
     )
+    required_flag = None
+    if target is TaskState.READY_FOR_ANALYSIS:
+        required_flag = models.EpicContextEntry.is_required_for_analysis
+    elif target is TaskState.READY_FOR_IMPLEMENTATION:
+        required_flag = models.EpicContextEntry.is_required_for_implementation
+    missing_epic_context_kinds: tuple[str, ...] = ()
+    if required_flag is not None:
+        required_kinds = set(
+            session.scalars(
+                select(models.EpicContextEntry.kind).where(
+                    models.EpicContextEntry.epic_id == task.epic_id,
+                    required_flag.is_(True),
+                    models.EpicContextEntry.status != EpicContextStatus.REJECTED,
+                )
+            )
+        )
+        approved_kinds = set(
+            session.scalars(
+                select(models.EpicContextEntry.kind).where(
+                    models.EpicContextEntry.epic_id == task.epic_id,
+                    models.EpicContextEntry.status == EpicContextStatus.ACTIVE,
+                    models.EpicContextEntry.authority.in_(
+                        [ContextAuthority.APPROVED, ContextAuthority.AUTHORITATIVE]
+                    ),
+                )
+            )
+        )
+        missing_epic_context_kinds = tuple(
+            sorted(kind.value for kind in required_kinds - approved_kinds)
+        )
     facts = ReadinessFacts(
         objective_exists=bool(task.objective.strip()),
         architect_assigned=task.architect_actor_id is not None,
@@ -271,6 +688,7 @@ def get_readiness(
             models.ReviewFinding.status == "OPEN",
         ),
         performed_by_architect=actor_id == task.architect_actor_id,
+        missing_epic_context_kinds=missing_epic_context_kinds,
     )
     return evaluate_readiness(target, facts)
 
@@ -324,6 +742,40 @@ def add_context(
         created_by_actor_id=command.acting_actor_id,
     )
     return add_task_entity(session, task_id, command, entity, "ContextAdded")
+
+
+def create_context_conflict(
+    session: Session, task_id: UUID, command: schemas.ContextConflictCreate
+) -> models.ContextConflict:
+    task = _task(session, task_id, command.expected_version)
+    epic_context = _epic_context(session, task.epic_id, command.epic_context_id)
+    task_context = _get(session, models.ContextEntry, command.task_context_id)
+    if task_context.task_id != task.id:
+        raise PolicyError("Task context entry does not belong to this task")
+    if epic_context.status is not EpicContextStatus.ACTIVE or epic_context.authority not in {
+        ContextAuthority.APPROVED,
+        ContextAuthority.AUTHORITATIVE,
+    }:
+        raise PolicyError("A conflict must reference active approved epic context")
+    conflict = models.ContextConflict(
+        task_id=task.id,
+        epic_context_id=epic_context.id,
+        task_context_id=task_context.id,
+        reason=command.reason,
+        created_by_actor_id=command.acting_actor_id,
+    )
+    session.add(conflict)
+    session.flush()
+    _mutate_task(
+        session,
+        task,
+        "ContextConflictRecorded",
+        command.acting_actor_id,
+        {"conflict_id": str(conflict.id)},
+    )
+    session.commit()
+    session.refresh(conflict)
+    return conflict
 
 
 def add_requirement(
@@ -455,8 +907,11 @@ def approve_decision(
 
 def get_task_working_context(session: Session, task_id: UUID) -> dict[str, Any]:
     task = _task(session, task_id)
+    epic = _get(session, models.Epic, task.epic_id)
     result: dict[str, Any] = {
         "task": schemas.TaskRead.model_validate(task).model_dump(mode="json"),
+        "epic_version": epic.version,
+        "task_version": task.version,
         "allowed_transitions": allowed_for_task(session, task),
     }
     events = session.scalars(
@@ -498,6 +953,32 @@ def get_task_working_context(session: Session, task_id: UUID) -> dict[str, Any]:
             }
             for row in rows
         ]
+    active = list_epic_context(session, epic.id)
+    pending = list_epic_context(
+        session,
+        epic.id,
+        include_proposed=True,
+        authority=ContextAuthority.PROPOSED,
+    )
+    result["epic_context"] = {
+        "active": [
+            schemas.EpicContextRead.model_validate(row).model_dump(mode="json") for row in active
+        ],
+        "pending_proposals": [
+            schemas.EpicContextRead.model_validate(row).model_dump(mode="json") for row in pending
+        ],
+    }
+    conflicts = session.scalars(
+        select(models.ContextConflict).where(models.ContextConflict.task_id == task.id)
+    )
+    result["context_conflicts"] = [
+        {
+            "epic_context_id": str(item.epic_context_id),
+            "task_context_id": str(item.task_context_id),
+            "reason": item.reason,
+        }
+        for item in conflicts
+    ]
     return result
 
 

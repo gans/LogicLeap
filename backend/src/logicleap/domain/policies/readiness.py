@@ -20,12 +20,14 @@ class ReadinessFacts:
     unresolved_blocking_review_findings: int = 0
     unresolved_critical_issues: int = 0
     performed_by_architect: bool = False
+    missing_epic_context_kinds: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
 class MissingFact:
     code: str
     message: str
+    required_kind: str | None = None
 
 
 @dataclass(frozen=True)
@@ -131,5 +133,13 @@ def evaluate_readiness(target: TaskState, facts: ReadinessFacts) -> ReadinessRes
     }
     missing = tuple(
         MissingFact(code, message) for ok, code, message in checks.get(target, ()) if not ok
+    )
+    missing += tuple(
+        MissingFact(
+            "MISSING_EPIC_CONTEXT",
+            f"Approved epic {kind.lower().replace('_', ' ')} context is required",
+            kind,
+        )
+        for kind in facts.missing_epic_context_kinds
     )
     return ReadinessResult(not missing, target, missing)
