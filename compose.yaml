@@ -1,61 +1,94 @@
 services:
   postgres:
-    image: postgres:17-alpine
+    image: postgres:17-alpine@sha256:742f40ea20b9ff2ff31db5458d127452988a2164df9e17441e191f3b72252193
     environment:
-      POSTGRES_DB: logicleap
-      POSTGRES_USER: logicleap
-      POSTGRES_PASSWORD: logicleap
-    ports:
-      - "5432:5432"
+      POSTGRES_DB: ${POSTGRES_DB:-logicleap}
+      POSTGRES_USER: ${POSTGRES_USER:-logicleap}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-logicleap}
     volumes:
       - postgres_data:/var/lib/postgresql/data
+    networks:
+      - database
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U logicleap -d logicleap"]
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
       interval: 3s
       timeout: 3s
       retries: 20
+      start_period: 5s
+    restart: unless-stopped
+    mem_limit: 768m
+    cpus: 1.0
 
   backend:
     build:
       context: .
       dockerfile: Dockerfile.backend
+      target: development
     environment:
-      LOGICLEAP_DATABASE_URL: postgresql+psycopg://logicleap:logicleap@postgres:5432/logicleap
+      LOGICLEAP_DATABASE_URL: postgresql+psycopg://${POSTGRES_USER:-logicleap}:${POSTGRES_PASSWORD:-logicleap}@postgres:5432/${POSTGRES_DB:-logicleap}
     ports:
-      - "8000:8000"
+      - "127.0.0.1:8000:8000"
+    networks:
+      - app
+      - database
     depends_on:
       postgres:
         condition: service_healthy
     healthcheck:
-      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/ready')"]
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/ready')"]
       interval: 5s
       timeout: 3s
       retries: 20
+      start_period: 5s
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    init: true
+    restart: unless-stopped
+    mem_limit: 512m
+    cpus: 1.0
 
   mcp:
     build:
       context: .
       dockerfile: Dockerfile.backend
+      target: runtime
     command: ["python", "-m", "logicleap.mcp.server"]
     environment:
-      LOGICLEAP_DATABASE_URL: postgresql+psycopg://logicleap:logicleap@postgres:5432/logicleap
+      LOGICLEAP_DATABASE_URL: postgresql+psycopg://${POSTGRES_USER:-logicleap}:${POSTGRES_PASSWORD:-logicleap}@postgres:5432/${POSTGRES_DB:-logicleap}
     ports:
-      - "8001:8001"
+      - "127.0.0.1:8001:8001"
+    networks:
+      - app
+      - database
     depends_on:
       postgres:
         condition: service_healthy
     healthcheck:
-      test: ["CMD", "python", "-c", "import socket; s=socket.create_connection(('localhost',8001),2); s.close()"]
+      test: ["CMD", "python", "-c", "import socket; s=socket.create_connection(('127.0.0.1',8001),2); s.close()"]
       interval: 5s
       timeout: 3s
       retries: 20
+      start_period: 5s
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    init: true
+    restart: unless-stopped
+    mem_limit: 384m
+    cpus: 0.75
 
   frontend:
     build:
       context: .
       dockerfile: Dockerfile.frontend
+      target: development
     ports:
-      - "5173:5173"
+      - "127.0.0.1:5173:5173"
+    networks:
+      - app
     depends_on:
       backend:
         condition: service_healthy
@@ -64,6 +97,20 @@ services:
       interval: 5s
       timeout: 3s
       retries: 20
+      start_period: 5s
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    init: true
+    restart: unless-stopped
+    mem_limit: 512m
+    cpus: 1.0
+
+networks:
+  app:
+  database:
+    internal: true
 
 volumes:
   postgres_data:
