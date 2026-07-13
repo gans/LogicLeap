@@ -1,6 +1,7 @@
 import { FormEvent, useEffect, useState } from "react";
 import { Actor, Epic, request, Task, WorkingContext } from "./api";
 import "./styles.css";
+import "./task-detail.css";
 
 const field = (form: FormData, name: string) => String(form.get(name) ?? "");
 
@@ -74,8 +75,18 @@ function EpicView({ epic, actors, tasks, onTask, onCreate }: { epic: Epic; actor
 
 function TaskView({ context, actors, back, mutate }: { context: WorkingContext; actors: Actor[]; back: ()=>void; mutate: (path:string,data:object)=>void }) {
   const t=context.task; const actor=actors[0];
+  const [copied, setCopied] = useState(false);
+  useEffect(() => {
+    if (!copied) return;
+    const timer = window.setTimeout(() => setCopied(false), 2000);
+    return () => window.clearTimeout(timer);
+  }, [copied]);
   const command=(extra:object)=>({acting_actor_id:actor?.id,expected_version:t.version,...extra});
-  return <><button className="back" onClick={back}>← Epic tasks</button><section className="hero task-hero"><span className={`state ${t.state.toLowerCase()}`}>{t.state.replaceAll("_"," ")}</span><h2>{t.title}</h2><p>{t.summary}</p><div className="outcome"><b>Objective</b>{t.objective}</div></section><div className="task-grid"><section className="panel readiness"><h3>Readiness & transitions</h3>{context.allowed_transitions.map(x=><div className="transition" key={x.target_state}><div><b>{x.target_state.replaceAll("_"," ")}</b>{x.missing.map(m=><small key={m.code}>{m.message}</small>)}</div><button disabled={!x.ready} onClick={()=>mutate(`/tasks/${t.id}/transition-requests`,command({target_state:x.target_state}))}>{x.ready?"Transition":"Not ready"}</button></div>)}</section><section className="panel"><h3>Working context</h3>{(["actors","requirements","acceptance_criteria","context_entries","questions","blockers","decisions","implementation_runs","evidence","reviews"] as const).map(name=><DataGroup key={name} name={name} rows={context[name]} />)}</section></div><section className="panel timeline"><h3>Chronological timeline</h3>{context.timeline.map(event=><div className="record" key={String(event.id)}><b>#{String(event.sequence)} · {String(event.type)}</b><small>{String(event.occurred_at)}</small></div>)}</section><CommandForms task={t} actorId={actor?.id ?? ""} mutate={mutate}/></>;
+  const copyTaskId = async () => {
+    await navigator.clipboard.writeText(t.id);
+    setCopied(true);
+  };
+  return <><button className="back" onClick={back}>← Epic tasks</button><section className="hero task-hero"><span className={`state ${t.state.toLowerCase()}`}>{t.state.replaceAll("_"," ")}</span><h2>{t.title}</h2><div className="task-id"><code>{t.id}</code><button type="button" onClick={copyTaskId}>{copied?"Copied":"Copy task ID"}</button></div><p>{t.summary}</p><div className="outcome"><b>Objective</b>{t.objective}</div></section><div className="task-grid"><section className="panel readiness"><h3>Readiness & transitions</h3>{context.allowed_transitions.map(x=><div className="transition" key={x.target_state}><div><b>{x.target_state.replaceAll("_"," ")}</b>{x.missing.map(m=><small key={m.code}>{m.message}</small>)}</div><button disabled={!x.ready} onClick={()=>mutate(`/tasks/${t.id}/transition-requests`,command({target_state:x.target_state}))}>{x.ready?"Transition":"Not ready"}</button></div>)}</section><section className="panel"><h3>Working context</h3>{(["actors","requirements","acceptance_criteria","context_entries","questions","blockers","decisions","implementation_runs","evidence","reviews"] as const).map(name=><DataGroup key={name} name={name} rows={context[name]} />)}</section></div><section className="panel timeline"><h3>Chronological timeline</h3>{context.timeline.map(event=><div className="record" key={String(event.id)}><b>#{String(event.sequence)} · {String(event.type)}</b><small>{String(event.occurred_at)}</small></div>)}</section><CommandForms task={t} actorId={actor?.id ?? ""} mutate={mutate}/></>;
 }
 
 function DataGroup({name,rows}:{name:string;rows:Record<string,unknown>[]}) { return <details className="data-group" open={rows.length>0}><summary>{name.replaceAll("_"," ")} <span>{rows.length}</span></summary>{rows.length===0?<p className="muted">Nothing registered yet.</p>:rows.map((row,i)=><div className="record" key={String(row.id??i)}>{String(row.title??row.description??row.question??row.summary??row.role??"Entry")}<small>{String(row.status??row.kind??"")}</small></div>)}</details>; }
