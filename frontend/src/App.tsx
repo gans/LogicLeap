@@ -1,6 +1,6 @@
 import { FormEvent, useCallback, useEffect, useState } from "react";
 import { Link, Route, Routes, useMatch, useNavigate, useParams } from "react-router-dom";
-import { Actor, Epic, request, Task, WorkingContext } from "./api";
+import { Actor, Epic, EpicContextEntry, request, Task, WorkingContext } from "./api";
 import "./styles.css";
 import "./task-detail.css";
 import "./navigation.css";
@@ -92,6 +92,10 @@ function EpicRoutePage({ actors, epics }: { actors: Actor[]; epics: Epic[] }) {
   const { epicId = "", taskId } = useParams();
   const epic = epics.find(item => item.id === epicId);
   const [tasks, setTasks] = useState<Task[]>([]);
+  const [currentEpic, setCurrentEpic] = useState<Epic | null>(epic ?? null);
+  const [epicContexts, setEpicContexts] = useState<EpicContextEntry[]>([]);
+  const [contextHistory, setContextHistory] = useState<EpicContextEntry[]>([]);
+  const [epicTimeline, setEpicTimeline] = useState<Record<string, unknown>[]>([]);
   const [context, setContext] = useState<WorkingContext | null>(null);
   const [status, setStatus] = useState<RouteStatus>("loading-epic");
   const [error, setError] = useState("");
@@ -116,8 +120,18 @@ function EpicRoutePage({ actors, epics }: { actors: Actor[]; epics: Epic[] }) {
     if (!epic) return;
     setError(""); setContext(null); setStatus("loading-epic");
     try {
-      const nextTasks = await request<Task[]>(`/epics/${epic.id}/tasks`);
+      const [nextEpic, nextTasks, nextContexts, nextHistory, nextTimeline] = await Promise.all([
+        request<Epic>(`/epics/${epic.id}`),
+        request<Task[]>(`/epics/${epic.id}/tasks`),
+        request<EpicContextEntry[]>(`/epics/${epic.id}/contexts?include_proposed=true`),
+        request<EpicContextEntry[]>(`/epics/${epic.id}/context-history`),
+        request<Record<string, unknown>[]>(`/epics/${epic.id}/timeline`),
+      ]);
+      setCurrentEpic(nextEpic);
       setTasks(nextTasks);
+      setEpicContexts(nextContexts);
+      setContextHistory(nextHistory);
+      setEpicTimeline(nextTimeline);
       await loadTaskContext(nextTasks);
     } catch (cause) { setError((cause as Error).message); setStatus("error"); }
   }, [epic, loadTaskContext]);
@@ -138,6 +152,13 @@ function EpicRoutePage({ actors, epics }: { actors: Actor[]; epics: Epic[] }) {
     } catch (cause) { setError((cause as Error).message); setStatus("error"); }
   };
 
+  const mutateEpic = async (path: string, data: object) => {
+    try {
+      await request(path, { method: "POST", body: JSON.stringify(data) });
+      await loadRoute();
+    } catch (cause) { setError((cause as Error).message); setStatus("error"); }
+  };
+
   const mutateTask = async (path: string, data: object) => {
     try {
       await request(path, { method: "POST", body: JSON.stringify(data) });
@@ -145,8 +166,9 @@ function EpicRoutePage({ actors, epics }: { actors: Actor[]; epics: Epic[] }) {
     } catch (cause) { setError((cause as Error).message); setStatus("error"); }
   };
 
-  if (taskId && context) return <TaskView context={context} actors={actors} back={() => navigate(`/epics/${epic.id}`)} mutate={mutateTask} />;
-  return <EpicView epic={epic} actors={actors} tasks={tasks} onTask={(task) => navigate(`/epics/${epic.id}/tasks/${task.id}`)} onCreate={createTask} />;
+  const displayedEpic = currentEpic ?? epic;
+  if (taskId && context) return <TaskView context={context} actors={actors} back={() => navigate(`/epics/${epic.id}`)} mutate={mutateTask} mutateEpic={mutateEpic} />;
+  return <EpicView epic={displayedEpic} actors={actors} tasks={tasks} contexts={epicContexts} history={contextHistory} timeline={epicTimeline} onTask={(task) => navigate(`/epics/${epic.id}/tasks/${task.id}`)} onCreate={createTask} mutateEpic={mutateEpic} />;
 }
 
 function LoadingScreen({ text }: { text: string }) { return <div className="empty" role="status"><div>↗</div><h2>{text}</h2></div>; }
@@ -161,11 +183,20 @@ function CreateEpic({ actors, onSubmit }: { actors: Actor[]; onSubmit: (data: ob
   return <details><summary>＋ New epic</summary><form className="compact" onSubmit={(event) => { event.preventDefault(); const f = new FormData(event.currentTarget); onSubmit({ title: field(f,"title"), summary: field(f,"summary"), problem_statement: field(f,"problem"), desired_outcome: field(f,"outcome"), architect_actor_id: field(f,"architect"), acting_actor_id: field(f,"architect") }); }}><input name="title" placeholder="Epic title" required/><textarea name="summary" placeholder="Summary" required/><textarea name="problem" placeholder="Problem statement" required/><textarea name="outcome" placeholder="Desired outcome" required/><select name="architect" required><option value="">Architect</option>{actors.map(a=><option value={a.id} key={a.id}>{a.display_name}</option>)}</select><button className="primary">Create epic</button></form></details>;
 }
 
-function EpicView({ epic, actors, tasks, onTask, onCreate }: { epic: Epic; actors: Actor[]; tasks: Task[]; onTask: (t: Task) => void; onCreate: (data: object) => void }) {
-  return <><section className="hero"><span className="eyebrow">EPIC</span><h2>{epic.title}</h2><p>{epic.problem_statement}</p><div className="outcome"><b>Desired outcome</b>{epic.desired_outcome}</div></section><div className="section-title"><h2>Tasks</h2><span>{tasks.length}</span></div><div className="cards">{tasks.map(task=><button className="task-card" key={task.id} onClick={()=>onTask(task)}><span className={`state ${task.state.toLowerCase()}`}>{task.state.replaceAll("_"," ")}</span><h3>{task.title}</h3><p>{task.objective}</p><small>v{task.version} · Open task →</small></button>)}</div><details className="wide"><summary>＋ Add task</summary><form className="inline-form" onSubmit={(event)=>{event.preventDefault();const f=new FormData(event.currentTarget);onCreate({title:field(f,"title"),summary:field(f,"summary"),objective:field(f,"objective"),acting_actor_id:field(f,"actor")});}}><input name="title" placeholder="Task title" required/><input name="summary" placeholder="Summary" required/><input name="objective" placeholder="Objective" required/><select name="actor" required>{actors.map(a=><option value={a.id} key={a.id}>{a.display_name}</option>)}</select><button className="primary">Create</button></form></details></>;
+function EpicView({ epic, actors, tasks, contexts, history, timeline, onTask, onCreate, mutateEpic }: { epic: Epic; actors: Actor[]; tasks: Task[]; contexts: EpicContextEntry[]; history: EpicContextEntry[]; timeline: Record<string, unknown>[]; onTask: (t: Task) => void; onCreate: (data: object) => void; mutateEpic: (path:string,data:object)=>void }) {
+  const active=contexts.filter(x=>x.status==="ACTIVE" && ["APPROVED","AUTHORITATIVE"].includes(x.authority));
+  const pending=contexts.filter(x=>x.status==="ACTIVE" && x.authority==="PROPOSED");
+  return <><section className="hero"><span className="eyebrow">EPIC</span><h2>{epic.title}</h2><p>{epic.problem_statement}</p><div className="outcome"><b>Desired outcome</b>{epic.desired_outcome}</div></section><EpicContextSection epic={epic} actors={actors} active={active} pending={pending} history={history} mutate={mutateEpic}/><div className="section-title"><h2>Tasks</h2><span>{tasks.length}</span></div><div className="cards">{tasks.map(task=><button className="task-card" key={task.id} onClick={()=>onTask(task)}><span className={`state ${task.state.toLowerCase()}`}>{task.state.replaceAll("_"," ")}</span><h3>{task.title}</h3><p>{task.objective}</p><small>v{task.version} · Open task →</small></button>)}</div><details className="wide"><summary>＋ Add task</summary><form className="inline-form" onSubmit={(event)=>{event.preventDefault();const f=new FormData(event.currentTarget);onCreate({title:field(f,"title"),summary:field(f,"summary"),objective:field(f,"objective"),acting_actor_id:field(f,"actor")});}}><input name="title" placeholder="Task title" required/><input name="summary" placeholder="Summary" required/><input name="objective" placeholder="Objective" required/><select name="actor" required>{actors.map(a=><option value={a.id} key={a.id}>{a.display_name}</option>)}</select><button className="primary">Create</button></form></details><section className="panel timeline"><h3>Epic timeline</h3>{timeline.map((event,i)=><div className="record" key={String(event.id??i)}><b>#{String(event.sequence)} · {String(event.type)}</b><small>{String(event.occurred_at)}</small></div>)}</section></>;
 }
 
-function TaskView({ context, actors, back, mutate }: { context: WorkingContext; actors: Actor[]; back: ()=>void; mutate: (path:string,data:object)=>void }) {
+const EPIC_KINDS=["BUSINESS","ARCHITECTURE","DOMAIN","CODEBASE","CONSTRAINT","SECURITY","ENVIRONMENT","OPERATIONS","TESTING","DEPLOYMENT","LESSON_LEARNED","DECISION_SUMMARY","OTHER"];
+function actorName(actors:Actor[],id:string|null){return actors.find(a=>a.id===id)?.display_name??id??"—";}
+function ContextCard({entry,actors}:{entry:EpicContextEntry;actors:Actor[]}){return <article className="context-card"><div><span className="eyebrow">{entry.kind}</span> <span className="state">{entry.authority} · {entry.status}</span></div><h4>{entry.title}</h4><p>{entry.content}</p><small>Created by {actorName(actors,entry.created_by_actor_id)}{entry.approved_by_actor_id?` · Approved by ${actorName(actors,entry.approved_by_actor_id)} ${entry.approved_at??""}`:""}{entry.source_task_id?` · From task ${entry.source_task_id}`:""}{entry.supersedes_context_id?` · Replaces ${entry.supersedes_context_id}`:""}</small></article>}
+function EpicContextSection({epic,actors,active,pending,history,mutate}:{epic:Epic;actors:Actor[];active:EpicContextEntry[];pending:EpicContextEntry[];history:EpicContextEntry[];mutate:(path:string,data:object)=>void}){
+  return <section className="epic-context"><div className="section-title"><h2>Epic context</h2><span>{active.length}</span></div><h3>Active context</h3>{active.length?active.map(x=><div key={x.id}><ContextCard entry={x} actors={actors}/><details><summary>Propose improvement</summary><form className="inline-form" onSubmit={e=>{e.preventDefault();const f=new FormData(e.currentTarget);mutate(`/epics/${epic.id}/contexts/${x.id}/propose-replacement`,{acting_actor_id:field(f,"actor"),expected_epic_version:epic.version,title:field(f,"title"),content:field(f,"content")});}}><input name="title" defaultValue={x.title} required/><textarea name="content" defaultValue={x.content} required/><select name="actor">{actors.map(a=><option value={a.id} key={a.id}>{a.display_name}</option>)}</select><button>Submit proposal</button></form></details></div>):<p className="muted">No active approved context.</p>}<h3>Pending proposals</h3>{pending.length?pending.map(x=><div key={x.id}><ContextCard entry={x} actors={actors}/>{x.supersedes_context_id&&<div className="comparison"><div><b>Current context</b><p>{history.find(h=>h.id===x.supersedes_context_id)?.content}</p></div><div><b>Proposed replacement</b><p>{x.content}</p></div></div>}<div className="proposal-actions"><button onClick={()=>mutate(`/epics/${epic.id}/contexts/${x.id}/approve`,{acting_actor_id:epic.architect_actor_id,expected_epic_version:epic.version})}>Approve</button><form onSubmit={e=>{e.preventDefault();const f=new FormData(e.currentTarget);mutate(`/epics/${epic.id}/contexts/${x.id}/reject`,{acting_actor_id:epic.architect_actor_id,expected_epic_version:epic.version,reason:field(f,"reason")});}}><input name="reason" placeholder="Rejection reason" required/><button>Reject</button></form></div></div>):<p className="muted">No pending proposals.</p>}<details className="wide"><summary>＋ Add epic context</summary><form className="inline-form" onSubmit={e=>{e.preventDefault();const f=new FormData(e.currentTarget);const actor=field(f,"actor");mutate(`/epics/${epic.id}/contexts`,{kind:field(f,"kind"),title:field(f,"title"),content:field(f,"content"),source_uri:field(f,"source_uri")||null,supersedes_context_id:field(f,"replacement")||null,acting_actor_id:actor,expected_epic_version:epic.version,approve_immediately:field(f,"mode")==="approved"});}}><select name="kind">{EPIC_KINDS.map(k=><option key={k}>{k}</option>)}</select><input name="title" placeholder="Context title" required/><textarea name="content" placeholder="Shared knowledge" required/><input name="source_uri" placeholder="Source URI (optional)"/><select name="actor">{actors.map(a=><option value={a.id} key={a.id}>{a.display_name}</option>)}</select><select name="replacement"><option value="">No replacement</option>{active.map(x=><option value={x.id} key={x.id}>{x.title}</option>)}</select><select name="mode"><option value="proposal">Submit proposal</option><option value="approved">Save as approved context</option></select><button className="primary">Save context</button></form></details><details><summary>History ({history.length})</summary>{history.map(x=><ContextCard key={x.id} entry={x} actors={actors}/>)}</details></section>;
+}
+
+function TaskView({ context, actors, back, mutate, mutateEpic }: { context: WorkingContext; actors: Actor[]; back: ()=>void; mutate: (path:string,data:object)=>void; mutateEpic:(path:string,data:object)=>void }) {
   const t=context.task; const actor=actors[0];
   const [copied, setCopied] = useState(false);
   useEffect(() => {
@@ -175,8 +206,10 @@ function TaskView({ context, actors, back, mutate }: { context: WorkingContext; 
   }, [copied]);
   const command=(extra:object)=>({acting_actor_id:actor?.id,expected_version:t.version,...extra});
   const copyTaskId = async () => { await navigator.clipboard.writeText(t.id); setCopied(true); };
-  return <><button className="back" onClick={back}>← Epic tasks</button><section className="hero task-hero"><span className={`state ${t.state.toLowerCase()}`}>{t.state.replaceAll("_"," ")}</span><h2>{t.title}</h2><div className="task-id"><code>{t.id}</code><button type="button" onClick={copyTaskId}>{copied?"Copied":"Copy task ID"}</button></div><p>{t.summary}</p><div className="outcome"><b>Objective</b>{t.objective}</div></section><div className="task-grid"><section className="panel readiness"><h3>Readiness & transitions</h3>{context.allowed_transitions.map(x=><div className="transition" key={x.target_state}><div><b>{x.target_state.replaceAll("_"," ")}</b>{x.missing.map(m=><small key={m.code}>{m.message}</small>)}</div><button disabled={!x.ready} onClick={()=>mutate(`/tasks/${t.id}/transition-requests`,command({target_state:x.target_state}))}>{x.ready?"Transition":"Not ready"}</button></div>)}</section><section className="panel"><h3>Working context</h3>{(["actors","requirements","acceptance_criteria","context_entries","questions","blockers","decisions","implementation_runs","evidence","reviews"] as const).map(name=><DataGroup key={name} name={name} rows={context[name]} />)}</section></div><section className="panel timeline"><h3>Chronological timeline</h3>{context.timeline.map(event=><div className="record" key={String(event.id)}><b>#{String(event.sequence)} · {String(event.type)}</b><small>{String(event.occurred_at)}</small></div>)}</section><CommandForms task={t} actorId={actor?.id ?? ""} mutate={mutate}/></>;
+  return <><button className="back" onClick={back}>← Epic tasks</button><section className="hero task-hero"><span className={`state ${t.state.toLowerCase()}`}>{t.state.replaceAll("_"," ")}</span><h2>{t.title}</h2><div className="task-id"><code>{t.id}</code><button type="button" onClick={copyTaskId}>{copied?"Copied":"Copy task ID"}</button></div><p>{t.summary}</p><div className="outcome"><b>Objective</b>{t.objective}</div></section><section className="panel"><h3>Inherited epic context</h3><small>Epic v{context.epic_version} · Task v{context.task_version}</small>{context.epic_context.active.map(x=><ContextCard key={x.id} entry={x} actors={actors}/>)}{context.epic_context.pending_proposals.length>0&&<details><summary>Pending proposals ({context.epic_context.pending_proposals.length}) — non-authoritative</summary>{context.epic_context.pending_proposals.map(x=><ContextCard key={x.id} entry={x} actors={actors}/>)}</details>}{context.context_conflicts.map(x=><p className="warning" key={`${x.epic_context_id}-${x.task_context_id}`}>{x.reason}</p>)}</section><div className="task-grid"><section className="panel readiness"><h3>Readiness & transitions</h3>{context.allowed_transitions.map(x=><div className="transition" key={x.target_state}><div><b>{x.target_state.replaceAll("_"," ")}</b>{x.missing.map(m=><small key={m.code}>{m.message}</small>)}</div><button disabled={!x.ready} onClick={()=>mutate(`/tasks/${t.id}/transition-requests`,command({target_state:x.target_state}))}>{x.ready?"Transition":"Not ready"}</button></div>)}</section><section className="panel"><h3>Working context</h3>{(["actors","requirements","acceptance_criteria","context_entries","questions","blockers","decisions","implementation_runs","evidence","reviews"] as const).map(name=><DataGroup key={name} name={name} rows={context[name]} />)}</section></div><PromoteLearning context={context} actors={actors} mutate={mutateEpic}/><section className="panel timeline"><h3>Chronological timeline</h3>{context.timeline.map(event=><div className="record" key={String(event.id)}><b>#{String(event.sequence)} · {String(event.type)}</b><small>{String(event.occurred_at)}</small></div>)}</section><CommandForms task={t} actorId={actor?.id ?? ""} mutate={mutate}/></>;
 }
+
+function PromoteLearning({context,actors,mutate}:{context:WorkingContext;actors:Actor[];mutate:(path:string,data:object)=>void}){const t=context.task;return <details className="wide"><summary>Promote to epic context</summary><form className="inline-form" onSubmit={e=>{e.preventDefault();const f=new FormData(e.currentTarget);const sourceType=field(f,"source_type"),sourceId=field(f,"source_id")||null;mutate(`/epics/${t.epic_id}/promote-task-learning`,{task_id:t.id,kind:field(f,"kind"),title:field(f,"title"),content:field(f,"content"),acting_actor_id:field(f,"actor"),expected_epic_version:context.epic_version,source_context_id:sourceType==="context"?sourceId:null,source_decision_id:sourceType==="decision"?sourceId:null,source_evidence_id:sourceType==="evidence"?sourceId:null,supersedes_context_id:field(f,"replacement")||null,approve_immediately:false});}}><select name="kind">{EPIC_KINDS.map(k=><option key={k}>{k}</option>)}</select><input name="title" placeholder="Learning title" required/><textarea name="content" placeholder="Proposed learning" required/><select name="source_type"><option value="manual">Manual learning</option><option value="context">Task context</option><option value="decision">Approved decision</option><option value="evidence">Evidence</option></select><input name="source_id" placeholder="Optional selected source ID"/><select name="replacement"><option value="">No replacement</option>{context.epic_context.active.map(x=><option value={x.id} key={x.id}>{x.title}</option>)}</select><select name="actor">{actors.map(a=><option value={a.id} key={a.id}>{a.display_name}</option>)}</select><button className="primary">Submit proposal</button></form></details>}
 
 function DataGroup({name,rows}:{name:string;rows:Record<string,unknown>[]}) { return <details className="data-group" open={rows.length>0}><summary>{name.replaceAll("_"," ")} <span>{rows.length}</span></summary>{rows.length===0?<p className="muted">Nothing registered yet.</p>:rows.map((row,i)=><div className="record" key={String(row.id??i)}>{String(row.title??row.description??row.question??row.summary??row.role??"Entry")}<small>{String(row.status??row.kind??"")}</small></div>)}</details>; }
 

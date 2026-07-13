@@ -48,3 +48,16 @@ nav a small {
   margin: 12px auto 0;
   text-decoration: none;
 }
+
+.epic-context { margin: 1.5rem 0; }
+.context-card { background: white; border: 1px solid #e0e3dc; border-radius: 10px; margin: .65rem 0; padding: 1rem; }
+.context-card h4 { margin: .4rem 0; }
+.context-card p { white-space: pre-wrap; }
+.comparison { border-left: 3px solid #9dcc3c; display: grid; gap: 1rem; grid-template-columns: repeat(2, minmax(0, 1fr)); padding-left: 1rem; }
+.proposal-actions { align-items: center; display: flex; gap: .75rem; margin-bottom: 1rem; }
+.proposal-actions form { display: flex; gap: .5rem; }
+.warning { border-left: 3px solid #b7791f; padding-left: .75rem; }
+
+@media (max-width: 800px) {
+  .comparison { grid-template-columns: 1fr; }
+}

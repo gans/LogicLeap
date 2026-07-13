@@ -10,8 +10,23 @@ export interface Task {
   state: string; blocked_from_state: string | null; architect_actor_id: string;
   version: number; created_at: string;
 }
+export interface EpicContextEntry {
+  id: string; epic_id: string; kind: string; title: string; content: string;
+  authority: string; status: string; created_by_actor_id: string;
+  approved_by_actor_id: string | null; approved_at: string | null;
+  supersedes_context_id: string | null; source_task_id: string | null;
+  source_context_id: string | null; source_decision_id: string | null;
+  source_evidence_id: string | null; source_uri: string | null;
+  is_required_for_analysis: boolean; is_required_for_implementation: boolean;
+  rejection_reason: string | null; deprecation_reason: string | null;
+  version: number; created_at: string; updated_at: string;
+}
 export interface WorkingContext {
   task: Task;
+  epic_version: number;
+  task_version: number;
+  epic_context: { active: EpicContextEntry[]; pending_proposals: EpicContextEntry[] };
+  context_conflicts: { epic_context_id: string; task_context_id: string; reason: string }[];
   actors: Record<string, unknown>[];
   requirements: Record<string, unknown>[];
   acceptance_criteria: Record<string, unknown>[];

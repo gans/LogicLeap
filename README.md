@@ -166,3 +166,25 @@ docker compose down -v
 - intent-specific APIs and MCP tools; no hard delete, generic update, SQL tool,
   or arbitrary query surface
 - centralized transition and readiness policies shared by every adapter
+
+## Epic context authority and precedence
+
+Epic context is a separate, history-preserving aggregate child; it is never
+represented as task context with a nullable task ID. Coding and review actors
+may propose shared context or a replacement, but only the epic architect can
+approve, reject, or deprecate it. Approved entries are never overwritten. An
+approved replacement marks its predecessor `SUPERSEDED`, while both records
+remain available through the epic context-history endpoint and timeline.
+
+Task working context applies this explicit precedence:
+
+1. active approved task-specific context;
+2. active approved or authoritative epic context;
+3. proposed or inferred context.
+
+Proposals are returned separately and are never mixed into authoritative agent
+instructions. Explicit `context_conflicts` retain both sources and explain why
+task-specific context overrides an epic default; semantic conflict detection is
+intentionally outside the MVP. Working context also reports the epic and task
+versions used so implementation, evidence, and review records can retain that
+traceability.
