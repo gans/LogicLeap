@@ -7,7 +7,7 @@ RUN npm ci --ignore-scripts
 FROM dependencies AS development
 COPY --chown=node:node frontend/index.html frontend/tsconfig.json frontend/vite.config.ts ./
 COPY --chown=node:node frontend/src ./src
-RUN chown -R node:node /app/node_modules
+RUN chown -R node:node /app
 USER node
 EXPOSE 5173
 CMD ["npm", "run", "dev"]
