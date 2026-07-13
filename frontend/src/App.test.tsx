@@ -181,7 +181,7 @@ describe("route-driven navigation", () => {
     fireEvent.click(await screen.findByText("＋ Add epic context"));
     fireEvent.change(screen.getByPlaceholderText("Context title"), { target: { value: "Business rules" } });
     fireEvent.change(screen.getByPlaceholderText("Shared knowledge"), { target: { value: "Preserve account identifiers." } });
-    fireEvent.click(screen.getByRole("button", { name: "Save context" }));
+    fireEvent.click(screen.getAllByRole("button", { name: "Submit proposal" }).at(-1)!);
     await waitFor(() => expect(vi.mocked(fetch)).toHaveBeenCalledWith(expect.stringContaining(`/epics/${epic.id}/contexts`), expect.objectContaining({ method: "POST" })));
     expect(screen.getByTestId("location")).toHaveTextContent(`/epics/${epic.id}`);
   });
@@ -190,7 +190,7 @@ describe("route-driven navigation", () => {
     renderAt(`/epics/${epic.id}`);
     fireEvent.click(await screen.findByText("Propose improvement"));
     fireEvent.change(screen.getByDisplayValue(activeContext.content), { target: { value: "Use staged releases." } });
-    fireEvent.click(screen.getByRole("button", { name: "Submit proposal" }));
+    fireEvent.click(screen.getAllByRole("button", { name: "Submit proposal" })[0]);
     await waitFor(() => expect(vi.mocked(fetch)).toHaveBeenCalledWith(expect.stringContaining(`/contexts/${activeContext.id}/propose-replacement`), expect.objectContaining({ method: "POST" })));
   });
 
