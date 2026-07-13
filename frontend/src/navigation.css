@@ -1,0 +1,50 @@
+.mark {
+  border: 0;
+  cursor: pointer;
+  padding: 0;
+}
+
+nav a {
+  border-radius: 10px;
+  color: #33433a;
+  display: block;
+  padding: 12px;
+  text-align: left;
+  text-decoration: none;
+}
+
+nav a:hover,
+nav a.selected {
+  background: white;
+  box-shadow: 0 2px 10px #1f33200b;
+}
+
+nav a strong,
+nav a small {
+  display: block;
+}
+
+nav a strong {
+  font-size: 13px;
+}
+
+nav a small {
+  color: #78827c;
+  font-size: 11px;
+  margin-top: 4px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.epic-card {
+  color: inherit;
+  display: block;
+  text-decoration: none;
+}
+
+.error-screen .primary {
+  display: inline-block;
+  margin: 12px auto 0;
+  text-decoration: none;
+}

@@ -1,64 +1,156 @@
-import { FormEvent, useEffect, useState } from "react";
+import { FormEvent, useCallback, useEffect, useState } from "react";
+import { Link, Route, Routes, useMatch, useNavigate, useParams } from "react-router-dom";
 import { Actor, Epic, request, Task, WorkingContext } from "./api";
 import "./styles.css";
 import "./task-detail.css";
+import "./navigation.css";
 
 const field = (form: FormData, name: string) => String(form.get(name) ?? "");
 
 export function App() {
+  const navigate = useNavigate();
+  const epicMatch = useMatch("/epics/:epicId/*");
+  const epicId = epicMatch?.params.epicId;
   const [actors, setActors] = useState<Actor[]>([]);
   const [epics, setEpics] = useState<Epic[]>([]);
-  const [epic, setEpic] = useState<Epic | null>(null);
-  const [tasks, setTasks] = useState<Task[]>([]);
-  const [context, setContext] = useState<WorkingContext | null>(null);
+  const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
 
-  const load = async () => {
-    const [nextActors, nextEpics] = await Promise.all([
-      request<Actor[]>("/actors"), request<Epic[]>("/epics"),
-    ]);
-    setActors(nextActors); setEpics(nextEpics);
-  };
-  useEffect(() => { load().catch((e: Error) => setError(e.message)); }, []);
-
-  const selectEpic = async (selected: Epic) => {
-    setEpic(selected); setContext(null);
-    setTasks(await request<Task[]>(`/epics/${selected.id}/tasks`));
-  };
-  const selectTask = async (task: Task) => {
-    setContext(await request<WorkingContext>(`/tasks/${task.id}/working-context`));
-  };
-  const submit = async (action: () => Promise<unknown>, refreshTask = false) => {
+  const loadBase = useCallback(async () => {
+    setLoading(true);
     setError("");
     try {
-      await action();
-      await load();
-      if (epic) await selectEpic(epic);
-      if (refreshTask && context) await selectTask(context.task);
-    } catch (e) { setError((e as Error).message); }
+      const [nextActors, nextEpics] = await Promise.all([
+        request<Actor[]>("/actors"), request<Epic[]>("/epics"),
+      ]);
+      setActors(nextActors);
+      setEpics(nextEpics);
+    } catch (cause) {
+      setError((cause as Error).message);
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+
+  useEffect(() => { void loadBase(); }, [loadBase]);
+
+  const createEpic = async (data: object) => {
+    setError("");
+    try {
+      const created = await request<Epic>("/epics", { method: "POST", body: JSON.stringify(data) });
+      await loadBase();
+      if (created.id) navigate(`/epics/${created.id}`);
+    } catch (cause) { setError((cause as Error).message); }
+  };
+
+  const createActor = async (data: object) => {
+    setError("");
+    try {
+      await request("/actors", { method: "POST", body: JSON.stringify(data) });
+      await loadBase();
+    } catch (cause) { setError((cause as Error).message); }
   };
 
   return (
     <div className="shell">
-      <header><div className="mark">LL</div><div><h1>LogicLeap</h1><p>Human-controlled delivery coordination</p></div></header>
+      <header>
+        <button className="mark" aria-label="LogicLeap home" onClick={() => navigate("/")}>LL</button>
+        <div><h1>LogicLeap</h1><p>Human-controlled delivery coordination</p></div>
+      </header>
       {error && <div className="error">{error}</div>}
       <div className="layout">
         <aside>
           <div className="section-title"><h2>Epics</h2><span>{epics.length}</span></div>
-          <nav>{epics.map((item) => <button className={epic?.id === item.id ? "selected" : ""} key={item.id} onClick={() => selectEpic(item)}><strong>{item.title}</strong><small>{item.summary}</small></button>)}</nav>
-          <CreateEpic actors={actors} onSubmit={(data) => submit(() => request("/epics", { method: "POST", body: JSON.stringify(data) }))} />
-          {!actors.length && <CreateActor onSubmit={(data) => submit(() => request("/actors", { method: "POST", body: JSON.stringify(data) }))} />}
+          {loading ? <p className="muted">Loading epic list…</p> :
+            <nav>{epics.map((item) => <Link className={epicId === item.id ? "selected" : ""} key={item.id} to={`/epics/${item.id}`}><strong>{item.title}</strong><small>{item.summary}</small></Link>)}</nav>}
+          <CreateEpic actors={actors} onSubmit={createEpic} />
+          {!actors.length && !loading && <CreateActor onSubmit={createActor} />}
         </aside>
         <main>
-          {!epic && <Empty title="Choose an epic" text="Select an epic or create the first one to begin coordinating work." />}
-          {epic && !context && <EpicView epic={epic} actors={actors} tasks={tasks} onTask={selectTask} onCreate={(data) => submit(() => request(`/epics/${epic.id}/tasks`, { method: "POST", body: JSON.stringify(data) }))} />}
-          {context && <TaskView context={context} actors={actors} back={() => setContext(null)} mutate={(path, data) => submit(() => request(path, { method: "POST", body: JSON.stringify(data) }), true)} />}
+          {loading ? <LoadingScreen text="Loading epic list…" /> : error ? <ErrorScreen message={error} /> :
+            <Routes>
+              <Route path="/" element={<EpicListPage epics={epics} />} />
+              <Route path="/epics/:epicId" element={<EpicRoutePage actors={actors} epics={epics} />} />
+              <Route path="/epics/:epicId/tasks/:taskId" element={<EpicRoutePage actors={actors} epics={epics} />} />
+              <Route path="*" element={<ErrorScreen message="This page does not exist." />} />
+            </Routes>}
         </main>
       </div>
     </div>
   );
 }
 
+function EpicListPage({ epics }: { epics: Epic[] }) {
+  if (!epics.length) return <Empty title="No epics yet" text="Create the first epic to begin coordinating work." />;
+  return <><div className="section-title"><h2>All epics</h2><span>{epics.length}</span></div><div className="cards">{epics.map(epic => <Link className="task-card epic-card" key={epic.id} to={`/epics/${epic.id}`}><span className="eyebrow">EPIC</span><h3>{epic.title}</h3><p>{epic.problem_statement}</p><small>Open epic →</small></Link>)}</div></>;
+}
+
+type RouteStatus = "loading-epic" | "loading-task" | "ready" | "error";
+
+function EpicRoutePage({ actors, epics }: { actors: Actor[]; epics: Epic[] }) {
+  const navigate = useNavigate();
+  const { epicId = "", taskId } = useParams();
+  const epic = epics.find(item => item.id === epicId);
+  const [tasks, setTasks] = useState<Task[]>([]);
+  const [context, setContext] = useState<WorkingContext | null>(null);
+  const [status, setStatus] = useState<RouteStatus>("loading-epic");
+  const [error, setError] = useState("");
+
+  const loadTaskContext = useCallback(async (expectedTasks: Task[]) => {
+    if (!taskId) { setContext(null); setStatus("ready"); return; }
+    if (!expectedTasks.some(task => task.id === taskId)) {
+      setError("Task not found in this epic."); setStatus("error"); return;
+    }
+    setStatus("loading-task");
+    try {
+      const nextContext = await request<WorkingContext>(`/tasks/${taskId}/working-context`);
+      if (nextContext.task.id !== taskId || nextContext.task.epic_id !== epicId) {
+        setError("Task not found in this epic."); setStatus("error"); return;
+      }
+      setContext(nextContext);
+      setStatus("ready");
+    } catch (cause) { setError((cause as Error).message); setStatus("error"); }
+  }, [epicId, taskId]);
+
+  const loadRoute = useCallback(async () => {
+    if (!epic) return;
+    setError(""); setContext(null); setStatus("loading-epic");
+    try {
+      const nextTasks = await request<Task[]>(`/epics/${epic.id}/tasks`);
+      setTasks(nextTasks);
+      await loadTaskContext(nextTasks);
+    } catch (cause) { setError((cause as Error).message); setStatus("error"); }
+  }, [epic, loadTaskContext]);
+
+  useEffect(() => { void loadRoute(); }, [loadRoute]);
+
+  if (!epic) return <ErrorScreen message="Epic not found." />;
+  if (status === "loading-epic") return <LoadingScreen text="Loading epic details and tasks…" />;
+  if (status === "loading-task") return <LoadingScreen text="Loading task working context…" />;
+  if (status === "error") return <ErrorScreen message={error} />;
+
+  const createTask = async (data: object) => {
+    setError("");
+    try {
+      await request(`/epics/${epic.id}/tasks`, { method: "POST", body: JSON.stringify(data) });
+      const nextTasks = await request<Task[]>(`/epics/${epic.id}/tasks`);
+      setTasks(nextTasks);
+    } catch (cause) { setError((cause as Error).message); setStatus("error"); }
+  };
+
+  const mutateTask = async (path: string, data: object) => {
+    try {
+      await request(path, { method: "POST", body: JSON.stringify(data) });
+      await loadTaskContext(tasks);
+    } catch (cause) { setError((cause as Error).message); setStatus("error"); }
+  };
+
+  if (taskId && context) return <TaskView context={context} actors={actors} back={() => navigate(`/epics/${epic.id}`)} mutate={mutateTask} />;
+  return <EpicView epic={epic} actors={actors} tasks={tasks} onTask={(task) => navigate(`/epics/${epic.id}/tasks/${task.id}`)} onCreate={createTask} />;
+}
+
+function LoadingScreen({ text }: { text: string }) { return <div className="empty" role="status"><div>↗</div><h2>{text}</h2></div>; }
+function ErrorScreen({ message }: { message: string }) { return <div className="empty error-screen"><div>!</div><h2>Unable to open this page</h2><p>{message}</p><Link className="primary" to="/">Back to epic list</Link></div>; }
 function Empty({ title, text }: { title: string; text: string }) { return <div className="empty"><div>↗</div><h2>{title}</h2><p>{text}</p></div>; }
 
 function CreateActor({ onSubmit }: { onSubmit: (data: object) => void }) {
@@ -82,10 +174,7 @@ function TaskView({ context, actors, back, mutate }: { context: WorkingContext; 
     return () => window.clearTimeout(timer);
   }, [copied]);
   const command=(extra:object)=>({acting_actor_id:actor?.id,expected_version:t.version,...extra});
-  const copyTaskId = async () => {
-    await navigator.clipboard.writeText(t.id);
-    setCopied(true);
-  };
+  const copyTaskId = async () => { await navigator.clipboard.writeText(t.id); setCopied(true); };
   return <><button className="back" onClick={back}>← Epic tasks</button><section className="hero task-hero"><span className={`state ${t.state.toLowerCase()}`}>{t.state.replaceAll("_"," ")}</span><h2>{t.title}</h2><div className="task-id"><code>{t.id}</code><button type="button" onClick={copyTaskId}>{copied?"Copied":"Copy task ID"}</button></div><p>{t.summary}</p><div className="outcome"><b>Objective</b>{t.objective}</div></section><div className="task-grid"><section className="panel readiness"><h3>Readiness & transitions</h3>{context.allowed_transitions.map(x=><div className="transition" key={x.target_state}><div><b>{x.target_state.replaceAll("_"," ")}</b>{x.missing.map(m=><small key={m.code}>{m.message}</small>)}</div><button disabled={!x.ready} onClick={()=>mutate(`/tasks/${t.id}/transition-requests`,command({target_state:x.target_state}))}>{x.ready?"Transition":"Not ready"}</button></div>)}</section><section className="panel"><h3>Working context</h3>{(["actors","requirements","acceptance_criteria","context_entries","questions","blockers","decisions","implementation_runs","evidence","reviews"] as const).map(name=><DataGroup key={name} name={name} rows={context[name]} />)}</section></div><section className="panel timeline"><h3>Chronological timeline</h3>{context.timeline.map(event=><div className="record" key={String(event.id)}><b>#{String(event.sequence)} · {String(event.type)}</b><small>{String(event.occurred_at)}</small></div>)}</section><CommandForms task={t} actorId={actor?.id ?? ""} mutate={mutate}/></>;
 }
 
