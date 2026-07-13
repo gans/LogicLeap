@@ -1,18 +1,60 @@
-FROM python:3.13-slim
+# syntax=docker/dockerfile:1.7@sha256:a57df69d0ea827fb7266491f2813635de6f17269be881f696fbfdf2d83dda33e
+FROM ghcr.io/astral-sh/uv:0.11.28@sha256:0f36cb9361a3346885ca3677e3767016687b5a170c1a6b88465ec14aefec90aa AS uv
+
+FROM python:3.13-slim@sha256:eb43ff125d8d58d7449dcba7d336c23bcac412f526d861db493b9994d8010280 AS build-base
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
-    PIP_DISABLE_PIP_VERSION_CHECK=1
+    UV_COMPILE_BYTECODE=1 \
+    UV_LINK_MODE=copy \
+    UV_NO_CACHE=1 \
+    UV_PYTHON_DOWNLOADS=never
 
 WORKDIR /app
-COPY backend/pyproject.toml ./
-COPY backend/src ./src
-RUN pip install --no-cache-dir -e '.[dev]'
-COPY backend/alembic.ini ./
-COPY backend/alembic ./alembic
-COPY backend/tests ./tests
-COPY backend/entrypoint.sh ./entrypoint.sh
-RUN chmod +x ./entrypoint.sh
+COPY --from=uv /uv /bin/uv
+COPY backend/pyproject.toml backend/uv.lock ./
 
+FROM build-base AS runtime-builder
+RUN uv sync --frozen --no-dev --no-install-project
+COPY backend/src ./src
+RUN uv sync --frozen --no-dev --no-editable
+
+FROM build-base AS development
+COPY backend/src ./src
+COPY backend/tests ./tests
+COPY backend/alembic.ini ./alembic.ini
+COPY backend/alembic ./alembic
+COPY backend/entrypoint.sh ./entrypoint.sh
+RUN uv sync --frozen --group dev --group security --no-editable \
+    && chmod 0555 ./entrypoint.sh \
+    && chown -R 10001:10001 /app
+ENV PATH="/app/.venv/bin:$PATH" \
+    HOME=/tmp \
+    XDG_CACHE_HOME=/tmp/.cache
+USER 10001:10001
+EXPOSE 8000
 CMD ["./entrypoint.sh"]
 
+FROM development AS test
+CMD ["pytest"]
+
+FROM python:3.13-slim@sha256:eb43ff125d8d58d7449dcba7d336c23bcac412f526d861db493b9994d8010280 AS runtime
+
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    PATH="/app/.venv/bin:$PATH" \
+    HOME=/tmp
+
+RUN groupadd --gid 10001 logicleap \
+    && useradd --uid 10001 --gid 10001 --no-create-home --home-dir /tmp --shell /usr/sbin/nologin logicleap \
+    && mkdir -p /app \
+    && chown 10001:10001 /app
+WORKDIR /app
+COPY --from=runtime-builder --chown=10001:10001 /app/.venv /app/.venv
+COPY --chown=10001:10001 backend/alembic.ini ./alembic.ini
+COPY --chown=10001:10001 backend/alembic ./alembic
+COPY --chown=10001:10001 backend/entrypoint.sh ./entrypoint.sh
+RUN chmod 0555 ./entrypoint.sh
+USER 10001:10001
+EXPOSE 8000 8001
+CMD ["./entrypoint.sh"]
