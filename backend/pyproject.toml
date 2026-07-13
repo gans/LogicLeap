@@ -17,13 +17,16 @@ dependencies = [
   "uvicorn[standard]>=0.35,<1",
 ]
 
-[project.optional-dependencies]
+[dependency-groups]
 dev = [
   "httpx>=0.28,<1",
   "mypy>=1.17,<2",
   "pytest>=8.4,<9",
   "pytest-asyncio>=1.1,<2",
   "ruff>=0.12,<1",
+]
+security = [
+  "pip-audit>=2.9,<3",
 ]
 
 [tool.hatch.build.targets.wheel]
@@ -44,4 +47,3 @@ select = ["E", "F", "I", "UP", "B", "SIM"]
 python_version = "3.13"
 strict = true
 packages = ["logicleap"]
-
