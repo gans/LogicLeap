@@ -10,7 +10,7 @@ requires-python = ">=3.13"
 dependencies = [
   "alembic>=1.16,<2",
   "fastapi>=0.116,<1",
-  "mcp[cli]>=1.12,<2",
+  "mcp[cli]>=1.12,<3",
   "psycopg[binary]>=3.2,<4",
   "pydantic-settings>=2.10,<3",
   "sqlalchemy>=2.0,<3",
